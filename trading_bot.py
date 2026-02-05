@@ -35,8 +35,7 @@ def get_market_data():
         
         return data, price, rsi, trend
     except Exception as e:
-        print(f"Data Error: {e}")
-        return None, 0, 0, "Error"
+        return None, 0, 0, f"Data Error: {str(e)}"
 
 # --- 3. DRAW CHART ---
 def create_chart(data):
@@ -45,93 +44,59 @@ def create_chart(data):
     mpf.plot(data.tail(40), type='candle', style='charles', volume=False, savefig=fname)
     return fname
 
-# --- 4. GET NEWS HEADLINES ---
+# --- 4. GET NEWS ---
 def get_news():
     try:
-        # We search specifically for Oil, War, and OPEC news
         feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+Conflict&hl=en-US&gl=US&ceid=US:en")
         if not feed.entries: return []
-        # Return top 5 headlines
         return [entry.title for entry in feed.entries[:5]]
     except:
         return []
 
-# --- 5. HYBRID ANALYSIS ENGINE ---
+# --- 5. ANALYZE (DEBUG MODE) ---
 def analyze_market(price, rsi, trend, headlines):
+    debug_log = ""
     
-    # STEP A: Try Google AI (The Smart Brain)
+    # STEP A: Try Google AI (Standard Flash Model)
     try:
         news_text = "\n".join([f"- {h}" for h in headlines])
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-        prompt = f"""
-        You are a hedge fund trader. 
-        Market Data: Price ${price:.2f}, RSI {rsi:.2f}, Trend {trend}.
-        News Headlines:
-        {news_text}
+        prompt = f"Market: Price ${price}, Trend {trend}. News: {news_text}. Buy or Sell? Short answer."
         
-        Task: DECIDE to BUY or SELL. 
-        Logic: If news is about War/Attacks/OPEC Cuts -> BUY. If news is Peace/Economy bad -> SELL.
-        Output: A short, aggressive trading signal with emojis.
-        """
         resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
         
         if resp.status_code == 200:
             return "🧠 **AI BRAIN ANALYSIS:**\n" + resp.json()['candidates'][0]['content']['parts'][0]['text']
-    except:
-        pass # If AI fails, we fall back to Step B silently
+        else:
+            # THIS IS THE FIX: IT WILL PRINT THE GOOGLE ERROR
+            debug_log = f"⚠️ Google Error ({resp.status_code}): {resp.text}"
+            
+    except Exception as e:
+        debug_log = f"⚠️ Connection Error: {str(e)}"
     
-    # STEP B: The "News Sentiment Algo" (Backup Brain)
-    # This runs if Google AI is broken. It calculates a score based on words.
-    
+    # STEP B: Fallback Algo (If AI failed, we use this)
     score = 0
-    bullish_words = ["war", "attack", "conflict", "strike", "escalat", "cut", "opec", "shortage", "sanction", "tension"]
-    bearish_words = ["peace", "talks", "ceasefire", "deal", "supply", "rise", "increase", "recession", "weak", "surplus"]
-    
     matches = []
+    keywords = {"WAR": 1, "CONFLICT": 1, "ATTACK": 1, "PEACE": -1, "TALKS": -1, "DEAL": -1}
     
-    for headline in headlines:
-        lower_h = headline.lower()
-        # Check Bullish
-        for word in bullish_words:
-            if word in lower_h:
-                score += 1
-                matches.append(f"🔥 Bullish News: {word.upper()} found")
-                break
-        # Check Bearish
-        for word in bearish_words:
-            if word in lower_h:
-                score -= 1
-                matches.append(f"❄️ Bearish News: {word.upper()} found")
-                break
+    for h in headlines:
+        for word, val in keywords.items():
+            if word in h.upper():
+                score += val
+                matches.append(f"{word} ({val})")
                 
-    # Final Decision Logic
-    signal = "WAIT ✋"
-    if score > 0: signal = "BUY 🟢 (War/Supply Risks)"
-    if score < 0: signal = "SELL 🔴 (Peace/Supply Glut)"
+    signal = "BUY 🟢" if score > 0 else "SELL 🔴" if score < 0 else "WAIT ✋"
     
-    # RSI Filters
-    if rsi < 30: signal = "BUY 🟢 (Oversold Bounce)"
-    if rsi > 70: signal = "SELL 🔴 (Overbought Drop)"
-
-    analysis_text = f"⚙️ **ALGO ANALYSIS (Backup):**\nSignal: **{signal}**\nNews Score: {score}\n\n"
-    if matches:
-        analysis_text += "📝 **Key News Factors:**\n" + "\n".join(matches)
-    else:
-        analysis_text += "No major war/peace keywords found in news."
-        
-    return analysis_text
+    return f"{debug_log}\n\n⚙️ **BACKUP ALGO:**\nSignal: {signal}\nScore: {score}\nKeywords: {', '.join(matches)}"
 
 # --- 6. SEND TELEGRAM ---
 def send_telegram(price, rsi, trend, analysis, chart_file):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    
-    # Send Chart
     if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
-
-    # Send Analysis
-    text = f"🛢 **WTI INTELLIGENCE**\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}"
+    
+    text = f"🛢 **WTI DEBUG REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN ---
@@ -142,4 +107,3 @@ if __name__ == "__main__":
         headlines = get_news()
         analysis = analyze_market(price, rsi, trend, headlines)
         send_telegram(price, rsi, trend, analysis, chart)
-        print("Sent successfully.")
