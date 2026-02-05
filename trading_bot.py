@@ -44,6 +44,7 @@ def get_market_data():
 def create_chart_image(data):
     filename = "oil_chart.png"
     subset = data.tail(40)
+    # Using 'charles' style for reliable Green/Red candles
     mpf.plot(subset, type='candle', style='charles', title="WTI Oil (30m)", volume=False, savefig=filename)
     return filename
 
@@ -57,10 +58,10 @@ def get_news():
     except:
         return "Could not fetch news."
 
-# --- 5. ASK GEMINI (UPDATED MODEL) ---
+# --- 5. ASK GEMINI (FIXED MODEL & SAFETY) ---
 def ask_gemini(price, rsi, trend, news):
-    # CHANGED MODEL TO 'gemini-pro' (More stable for free accounts)
-    model = genai.GenerativeModel('gemini-pro')
+    # FIXED: Using the latest stable model
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     prompt = f"""
     You are an expert Oil Trader.
@@ -69,8 +70,17 @@ def ask_gemini(price, rsi, trend, news):
     TASK: Give a BUY/SELL/WAIT signal based on War Risks + RSI Math.
     OUTPUT: Telegram format with emojis. Keep it short.
     """
+    
+    # SAFETY UNLOCK: Allows the AI to discuss "War" and "Conflicts" for financial analysis
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+
     try:
-        response = model.generate_content(prompt)
+        response = model.generate_content(prompt, safety_settings=safety_settings)
         return response.text
     except Exception as e:
         return f"⚠️ AI Error: {str(e)}"
