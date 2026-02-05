@@ -18,14 +18,31 @@ genai.configure(api_key=GEMINI_KEY)
 # --- 2. GET DATA & CALCULATE INDICATORS ---
 def get_market_data():
     ticker = "CL=F"  # WTI Crude Oil
-    # Download 5 days of data to make the chart look nice
+    # Download 5 days of data
     data = yf.download(ticker, period="5d", interval="30m", progress=False)
     
-    # Calculate RSI (The Bounce Indicator)
+    # --- BUG FIX: FLATTEN DATA ---
+    # Sometimes yfinance returns 2D tables instead of 1D lists. This fixes it.
+    if data.empty:
+        raise ValueError("No data downloaded!")
+        
+    # If MultiIndex columns (Ticker name in header), drop it
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.droplevel(1)
+
+    # Ensure "Close" is a 1D Series (flat list)
+    close_prices = data["Close"]
+    if hasattr(close_prices, "shape") and len(close_prices.shape) > 1:
+        close_prices = close_prices.iloc[:, 0]
+    
+    # Update data with the flat series
+    data["Close"] = close_prices
+
+    # Calculate RSI
     rsi_ind = RSIIndicator(close=data["Close"], window=14)
     data["RSI"] = rsi_ind.rsi()
     
-    # Calculate MACD (The Trend Indicator)
+    # Calculate MACD
     macd_ind = MACD(close=data["Close"])
     data["MACD"] = macd_ind.macd()
     data["Signal"] = macd_ind.macd_signal()
@@ -45,11 +62,11 @@ def get_market_data():
 def create_chart_image(data):
     filename = "oil_chart.png"
     
-    # Style the chart (Green up, Red down)
+    # Style the chart
     mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', inherit=True)
     style = mpf.make_mpf_style(marketcolors=mc, style='yahoo')
     
-    # Draw only the last 40 candles so it's zoomed in
+    # Draw last 40 candles
     subset = data.tail(40)
     
     mpf.plot(subset, type='candle', style=style, 
@@ -61,12 +78,17 @@ def create_chart_image(data):
 
 # --- 4. GET NEWS ---
 def get_news():
-    url = "https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+War&hl=en-US&gl=US&ceid=US:en"
-    feed = feedparser.parse(url)
-    headlines = ""
-    for i, entry in enumerate(feed.entries[:5]):
-        headlines += f"- {entry.title}\n"
-    return headlines
+    try:
+        url = "https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+War&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(url)
+        headlines = ""
+        if not feed.entries:
+            return "No specific news found."
+        for i, entry in enumerate(feed.entries[:5]):
+            headlines += f"- {entry.title}\n"
+        return headlines
+    except:
+        return "Could not fetch news."
 
 # --- 5. ASK GEMINI ---
 def ask_gemini(price, rsi, trend, news):
@@ -95,14 +117,16 @@ def ask_gemini(price, rsi, trend, news):
     **Risk:** [High / Medium / Low]
     **Reason:** [1-2 sentences explaining why]
     """
-    response = model.generate_content(prompt)
-    return response.text
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except:
+        return "AI Analysis Unavailable (Quota/Error)"
 
-# --- 6. SEND TO TELEGRAM (PHOTO + TEXT) ---
+# --- 6. SEND TO TELEGRAM ---
 def send_alert(message, image_file):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     
-    # Open the image file we created
     with open(image_file, 'rb') as f:
         files = {'photo': f}
         data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': message, 'parse_mode': 'Markdown'}
@@ -123,7 +147,6 @@ if __name__ == "__main__":
         print("4. Asking AI...")
         analysis = ask_gemini(price, rsi, trend, news)
         
-        # Build the message
         msg = f"🛢 **WTI LIVE UPDATE** 🛢\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}"
         
         print("5. Sending to Telegram...")
