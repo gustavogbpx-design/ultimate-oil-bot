@@ -1,5 +1,6 @@
 import os
 import yfinance as yf
+import google.generativeai as genai
 import requests
 import feedparser
 import pandas as pd
@@ -11,6 +12,8 @@ from ta.trend import MACD
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+genai.configure(api_key=GEMINI_KEY)
 
 # --- 2. GET DATA & CALCULATE INDICATORS ---
 def get_market_data():
@@ -41,6 +44,7 @@ def get_market_data():
 def create_chart_image(data):
     filename = "oil_chart.png"
     subset = data.tail(40)
+    # Using 'charles' style for reliable Green/Red candles
     mpf.plot(subset, type='candle', style='charles', title="WTI Oil (30m)", volume=False, savefig=filename)
     return filename
 
@@ -54,12 +58,12 @@ def get_news():
     except:
         return "Could not fetch news."
 
-# --- 5. ASK GEMINI (DIRECT HTTP MODE) ---
+# --- 5. ASK GEMINI (FIXED MODEL & SAFETY) ---
 def ask_gemini(price, rsi, trend, news):
-    # This method bypasses the library and talks directly to Google's server
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    # FIXED: Using the latest stable model
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
-    prompt_text = f"""
+    prompt = f"""
     You are an expert Oil Trader.
     DATA: Price ${price:.2f}, RSI {rsi:.2f}, Trend {trend}.
     NEWS: {news}
@@ -67,20 +71,19 @@ def ask_gemini(price, rsi, trend, news):
     OUTPUT: Telegram format with emojis. Keep it short.
     """
     
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt_text}]
-        }]
-    }
-    
+    # SAFETY UNLOCK: Allows the AI to discuss "War" and "Conflicts" for financial analysis
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+
     try:
-        response = requests.post(url, json=payload, headers={'Content-Type': 'application/json'})
-        if response.status_code == 200:
-            return response.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"⚠️ API Error: {response.text}"
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+        return response.text
     except Exception as e:
-        return f"⚠️ Connection Error: {str(e)}"
+        return f"⚠️ AI Error: {str(e)}"
 
 # --- 6. SEND TO TELEGRAM ---
 def send_alert(message, image_file):
