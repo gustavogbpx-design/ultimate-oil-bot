@@ -20,24 +20,18 @@ def get_market_data():
     ticker = "CL=F"  # WTI Crude Oil
     data = yf.download(ticker, period="5d", interval="30m", progress=False)
     
-    # --- BUG FIX: FLATTEN DATA ---
-    if data.empty:
-        raise ValueError("No data downloaded!")
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.droplevel(1)
+    if data.empty: raise ValueError("No data downloaded!")
+    if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
     close_prices = data["Close"]
-    if hasattr(close_prices, "shape") and len(close_prices.shape) > 1:
-        close_prices = close_prices.iloc[:, 0]
+    if hasattr(close_prices, "shape") and len(close_prices.shape) > 1: close_prices = close_prices.iloc[:, 0]
     data["Close"] = close_prices
 
-    # Indicators
     rsi_ind = RSIIndicator(close=data["Close"], window=14)
     data["RSI"] = rsi_ind.rsi()
     macd_ind = MACD(close=data["Close"])
     data["MACD"] = macd_ind.macd()
     data["Signal"] = macd_ind.macd_signal()
     
-    # Latest Values
     last_price = data["Close"].iloc[-1]
     last_rsi = data["RSI"].iloc[-1]
     last_macd = data["MACD"].iloc[-1]
@@ -46,17 +40,11 @@ def get_market_data():
     
     return data, last_price, last_rsi, trend
 
-# --- 3. DRAW THE CHART (SIMPLIFIED) ---
+# --- 3. DRAW THE CHART ---
 def create_chart_image(data):
     filename = "oil_chart.png"
     subset = data.tail(40)
-    
-    # We use 'charles' style which is standard Green/Red candles
-    mpf.plot(subset, type='candle', style='charles', 
-             title="WTI Oil (30m)", 
-             volume=False, 
-             savefig=filename)
-    
+    mpf.plot(subset, type='candle', style='charles', title="WTI Oil (30m)", volume=False, savefig=filename)
     return filename
 
 # --- 4. GET NEWS ---
@@ -69,21 +57,23 @@ def get_news():
     except:
         return "Could not fetch news."
 
-# --- 5. ASK GEMINI ---
+# --- 5. ASK GEMINI (UPDATED MODEL) ---
 def ask_gemini(price, rsi, trend, news):
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # CHANGED MODEL TO 'gemini-pro' (More stable for free accounts)
+    model = genai.GenerativeModel('gemini-pro')
+    
     prompt = f"""
-    You are an expert Oil Trader. Analyze this setup:
+    You are an expert Oil Trader.
     DATA: Price ${price:.2f}, RSI {rsi:.2f}, Trend {trend}.
     NEWS: {news}
     TASK: Give a BUY/SELL/WAIT signal based on War Risks + RSI Math.
-    OUTPUT: Telegram format with emojis.
+    OUTPUT: Telegram format with emojis. Keep it short.
     """
     try:
         response = model.generate_content(prompt)
         return response.text
-    except:
-        return "AI Analysis Unavailable."
+    except Exception as e:
+        return f"⚠️ AI Error: {str(e)}"
 
 # --- 6. SEND TO TELEGRAM ---
 def send_alert(message, image_file):
@@ -94,14 +84,14 @@ def send_alert(message, image_file):
 # --- MAIN RUN ---
 if __name__ == "__main__":
     try:
-        print("1. Fetching Data...")
+        print("Starting Bot...")
         data, price, rsi, trend = get_market_data()
-        print("2. Drawing Chart...")
         chart_file = create_chart_image(data)
-        print("3. Reading News & AI...")
-        analysis = ask_gemini(price, rsi, trend, get_news())
-        print("4. Sending...")
-        send_alert(f"🛢 **WTI UPDATE**\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}", chart_file)
-        print("Done!")
+        news = get_news()
+        analysis = ask_gemini(price, rsi, trend, news)
+        
+        msg = f"🛢 **WTI UPDATE**\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}"
+        send_alert(msg, chart_file)
+        print("Success!")
     except Exception as e:
         print(f"Error: {e}")
