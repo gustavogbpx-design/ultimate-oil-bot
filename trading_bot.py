@@ -53,50 +53,66 @@ def get_news():
     except:
         return []
 
-# --- 5. ANALYZE (DEBUG MODE) ---
-def analyze_market(price, rsi, trend, headlines):
-    debug_log = ""
-    
-    # STEP A: Try Google AI (Standard Flash Model)
+# --- 5. FIND THE CORRECT MODEL NAME ---
+def get_valid_model():
+    # Ask Google: "List all models I can use"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
     try:
-        news_text = "\n".join([f"- {h}" for h in headlines])
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-        prompt = f"Market: Price ${price}, Trend {trend}. News: {news_text}. Buy or Sell? Short answer."
+        resp = requests.get(url)
+        data = resp.json()
         
-        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
-        
-        if resp.status_code == 200:
-            return "🧠 **AI BRAIN ANALYSIS:**\n" + resp.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            # THIS IS THE FIX: IT WILL PRINT THE GOOGLE ERROR
-            debug_log = f"⚠️ Google Error ({resp.status_code}): {resp.text}"
-            
-    except Exception as e:
-        debug_log = f"⚠️ Connection Error: {str(e)}"
+        # Look for a model that supports 'generateContent'
+        if 'models' in data:
+            for model in data['models']:
+                if 'generateContent' in model.get('supportedGenerationMethods', []):
+                    # We found a working model! Return its name (e.g., "models/gemini-pro")
+                    return model['name']
+    except:
+        pass
+    return None
+
+# --- 6. ANALYZE (AUTO-DISCOVERY MODE) ---
+def analyze_market(price, rsi, trend, headlines):
     
-    # STEP B: Fallback Algo (If AI failed, we use this)
+    # STEP A: Find the correct model dynamically
+    model_name = get_valid_model()
+    
+    if model_name:
+        try:
+            news_text = "\n".join([f"- {h}" for h in headlines])
+            # Use the model name we found (e.g., models/gemini-1.0-pro)
+            url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
+            prompt = f"Market: Price ${price}, Trend {trend}. News: {news_text}. Buy or Sell? Short answer."
+            
+            resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
+            
+            if resp.status_code == 200:
+                return f"🧠 **AI ANALYSIS ({model_name.split('/')[-1]}):**\n" + resp.json()['candidates'][0]['content']['parts'][0]['text']
+        except:
+            pass
+            
+    # STEP B: Fallback Algo (If AI truly fails)
     score = 0
     matches = []
-    keywords = {"WAR": 1, "CONFLICT": 1, "ATTACK": 1, "PEACE": -1, "TALKS": -1, "DEAL": -1}
+    keywords = {"WAR": 1, "CONFLICT": 1, "ATTACK": 1, "PEACE": -1, "TALKS": -1}
     
     for h in headlines:
         for word, val in keywords.items():
             if word in h.upper():
                 score += val
-                matches.append(f"{word} ({val})")
+                matches.append(word)
                 
     signal = "BUY 🟢" if score > 0 else "SELL 🔴" if score < 0 else "WAIT ✋"
-    
-    return f"{debug_log}\n\n⚙️ **BACKUP ALGO:**\nSignal: {signal}\nScore: {score}\nKeywords: {', '.join(matches)}"
+    return f"⚙️ **BACKUP ALGO:**\nSignal: {signal}\nScore: {score}"
 
-# --- 6. SEND TELEGRAM ---
+# --- 7. SEND TELEGRAM ---
 def send_telegram(price, rsi, trend, analysis, chart_file):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🛢 **WTI DEBUG REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    text = f"🛢 **WTI REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN ---
