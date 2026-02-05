@@ -1,0 +1,8 @@
+yfinance
+google-generativeai
+requests
+ta
+pandas
+feedparser
+mplfinance
+matplotlib
