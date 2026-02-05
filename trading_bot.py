@@ -18,58 +18,41 @@ genai.configure(api_key=GEMINI_KEY)
 # --- 2. GET DATA & CALCULATE INDICATORS ---
 def get_market_data():
     ticker = "CL=F"  # WTI Crude Oil
-    # Download 5 days of data
     data = yf.download(ticker, period="5d", interval="30m", progress=False)
     
     # --- BUG FIX: FLATTEN DATA ---
-    # Sometimes yfinance returns 2D tables instead of 1D lists. This fixes it.
     if data.empty:
         raise ValueError("No data downloaded!")
-        
-    # If MultiIndex columns (Ticker name in header), drop it
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.droplevel(1)
-
-    # Ensure "Close" is a 1D Series (flat list)
     close_prices = data["Close"]
     if hasattr(close_prices, "shape") and len(close_prices.shape) > 1:
         close_prices = close_prices.iloc[:, 0]
-    
-    # Update data with the flat series
     data["Close"] = close_prices
 
-    # Calculate RSI
+    # Indicators
     rsi_ind = RSIIndicator(close=data["Close"], window=14)
     data["RSI"] = rsi_ind.rsi()
-    
-    # Calculate MACD
     macd_ind = MACD(close=data["Close"])
     data["MACD"] = macd_ind.macd()
     data["Signal"] = macd_ind.macd_signal()
     
-    # Get latest values
+    # Latest Values
     last_price = data["Close"].iloc[-1]
     last_rsi = data["RSI"].iloc[-1]
     last_macd = data["MACD"].iloc[-1]
     last_signal = data["Signal"].iloc[-1]
-    
-    # Determine Trend
     trend = "BULLISH (Up)" if last_macd > last_signal else "BEARISH (Down)"
     
     return data, last_price, last_rsi, trend
 
-# --- 3. DRAW THE CHART ---
+# --- 3. DRAW THE CHART (SIMPLIFIED) ---
 def create_chart_image(data):
     filename = "oil_chart.png"
-    
-    # Style the chart
-    mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', inherit=True)
-    style = mpf.make_mpf_style(marketcolors=mc, style='yahoo')
-    
-    # Draw last 40 candles
     subset = data.tail(40)
     
-    mpf.plot(subset, type='candle', style=style, 
+    # We use 'charles' style which is standard Green/Red candles
+    mpf.plot(subset, type='candle', style='charles', 
              title="WTI Oil (30m)", 
              volume=False, 
              savefig=filename)
@@ -81,77 +64,44 @@ def get_news():
     try:
         url = "https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+War&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(url)
-        headlines = ""
-        if not feed.entries:
-            return "No specific news found."
-        for i, entry in enumerate(feed.entries[:5]):
-            headlines += f"- {entry.title}\n"
-        return headlines
+        if not feed.entries: return "No specific news found."
+        return "\n".join([f"- {entry.title}" for entry in feed.entries[:5]])
     except:
         return "Could not fetch news."
 
 # --- 5. ASK GEMINI ---
 def ask_gemini(price, rsi, trend, news):
     model = genai.GenerativeModel('gemini-1.5-flash')
-    
     prompt = f"""
     You are an expert Oil Trader. Analyze this setup:
-    
-    DATA:
-    - Price: ${price:.2f}
-    - RSI: {rsi:.2f} (Over 70=Expensive, Under 30=Cheap)
-    - MACD Trend: {trend}
-    
-    NEWS HEADLINES:
-    {news}
-    
-    TASK:
-    Give a trading signal.
-    1. If News is scary (War/Supply Cut) -> Bias BUY.
-    2. If News is calm/Peace -> Bias SELL.
-    3. Use RSI to time the entry.
-    
-    OUTPUT FORMAT (Telegram Style):
-    🔮 **AI PREDICTION**
-    **Action:** [BUY / SELL / WAIT]
-    **Risk:** [High / Medium / Low]
-    **Reason:** [1-2 sentences explaining why]
+    DATA: Price ${price:.2f}, RSI {rsi:.2f}, Trend {trend}.
+    NEWS: {news}
+    TASK: Give a BUY/SELL/WAIT signal based on War Risks + RSI Math.
+    OUTPUT: Telegram format with emojis.
     """
     try:
         response = model.generate_content(prompt)
         return response.text
     except:
-        return "AI Analysis Unavailable (Quota/Error)"
+        return "AI Analysis Unavailable."
 
 # --- 6. SEND TO TELEGRAM ---
 def send_alert(message, image_file):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    
     with open(image_file, 'rb') as f:
-        files = {'photo': f}
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': message, 'parse_mode': 'Markdown'}
-        requests.post(url, files=files, data=data)
+        requests.post(url, files={'photo': f}, data={'chat_id': TELEGRAM_CHAT_ID, 'caption': message, 'parse_mode': 'Markdown'})
 
 # --- MAIN RUN ---
 if __name__ == "__main__":
     try:
         print("1. Fetching Data...")
         data, price, rsi, trend = get_market_data()
-        
         print("2. Drawing Chart...")
         chart_file = create_chart_image(data)
-        
-        print("3. Reading News...")
-        news = get_news()
-        
-        print("4. Asking AI...")
-        analysis = ask_gemini(price, rsi, trend, news)
-        
-        msg = f"🛢 **WTI LIVE UPDATE** 🛢\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}"
-        
-        print("5. Sending to Telegram...")
-        send_alert(msg, chart_file)
+        print("3. Reading News & AI...")
+        analysis = ask_gemini(price, rsi, trend, get_news())
+        print("4. Sending...")
+        send_alert(f"🛢 **WTI UPDATE**\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}", chart_file)
         print("Done!")
-        
     except Exception as e:
         print(f"Error: {e}")
