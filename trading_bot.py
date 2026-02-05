@@ -1,6 +1,5 @@
 import os
 import yfinance as yf
-import google.generativeai as genai
 import requests
 import feedparser
 import pandas as pd
@@ -13,95 +12,85 @@ GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-genai.configure(api_key=GEMINI_KEY)
-
-# --- 2. GET DATA & CALCULATE INDICATORS ---
+# --- 2. GET DATA ---
 def get_market_data():
-    ticker = "CL=F"  # WTI Crude Oil
-    data = yf.download(ticker, period="5d", interval="30m", progress=False)
-    
-    if data.empty: raise ValueError("No data downloaded!")
-    if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
-    close_prices = data["Close"]
-    if hasattr(close_prices, "shape") and len(close_prices.shape) > 1: close_prices = close_prices.iloc[:, 0]
-    data["Close"] = close_prices
+    ticker = "CL=F"
+    try:
+        data = yf.download(ticker, period="5d", interval="30m", progress=False)
+        if data.empty: return None, 0, 0, "No Data"
+        
+        # Cleanup Data Structure
+        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
+        close = data["Close"]
+        if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
+        data["Close"] = close
 
-    rsi_ind = RSIIndicator(close=data["Close"], window=14)
-    data["RSI"] = rsi_ind.rsi()
-    macd_ind = MACD(close=data["Close"])
-    data["MACD"] = macd_ind.macd()
-    data["Signal"] = macd_ind.macd_signal()
-    
-    last_price = data["Close"].iloc[-1]
-    last_rsi = data["RSI"].iloc[-1]
-    last_macd = data["MACD"].iloc[-1]
-    last_signal = data["Signal"].iloc[-1]
-    trend = "BULLISH (Up)" if last_macd > last_signal else "BEARISH (Down)"
-    
-    return data, last_price, last_rsi, trend
+        # Indicators
+        data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
+        macd = MACD(close=data["Close"])
+        data["MACD"] = macd.macd()
+        data["Signal"] = macd.macd_signal()
+        
+        # Latest
+        price = data["Close"].iloc[-1]
+        rsi = data["RSI"].iloc[-1]
+        trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
+        
+        return data, price, rsi, trend
+    except Exception as e:
+        print(f"Data Error: {e}")
+        return None, 0, 0, "Error"
 
-# --- 3. DRAW THE CHART ---
-def create_chart_image(data):
-    filename = "oil_chart.png"
-    subset = data.tail(40)
-    # Using 'charles' style for reliable Green/Red candles
-    mpf.plot(subset, type='candle', style='charles', title="WTI Oil (30m)", volume=False, savefig=filename)
-    return filename
+# --- 3. DRAW CHART ---
+def create_chart(data):
+    if data is None: return None
+    fname = "oil_chart.png"
+    mpf.plot(data.tail(40), type='candle', style='charles', volume=False, savefig=fname)
+    return fname
 
 # --- 4. GET NEWS ---
 def get_news():
     try:
-        url = "https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+War&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(url)
-        if not feed.entries: return "No specific news found."
-        return "\n".join([f"- {entry.title}" for entry in feed.entries[:5]])
+        feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC&hl=en-US&gl=US&ceid=US:en")
+        return "\n".join([f"- {e.title}" for e in feed.entries[:3]])
     except:
-        return "Could not fetch news."
+        return "News unavailable."
 
-# --- 5. ASK GEMINI (FIXED MODEL & SAFETY) ---
+# --- 5. ASK AI (Robust Mode) ---
 def ask_gemini(price, rsi, trend, news):
-    # FIXED: Using the latest stable model
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    prompt = f"Price: ${price:.2f}, RSI: {rsi:.2f}, Trend: {trend}. News: {news}. Should I BUY or SELL WTI Oil? Keep it short."
     
-    prompt = f"""
-    You are an expert Oil Trader.
-    DATA: Price ${price:.2f}, RSI {rsi:.2f}, Trend {trend}.
-    NEWS: {news}
-    TASK: Give a BUY/SELL/WAIT signal based on War Risks + RSI Math.
-    OUTPUT: Telegram format with emojis. Keep it short.
-    """
-    
-    # SAFETY UNLOCK: Allows the AI to discuss "War" and "Conflicts" for financial analysis
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
-
     try:
-        response = model.generate_content(prompt, safety_settings=safety_settings)
-        return response.text
+        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
+        if resp.status_code != 200: return f"⚠️ AI Napping (Status {resp.status_code})"
+        return resp.json()['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"⚠️ AI Error: {str(e)}"
 
-# --- 6. SEND TO TELEGRAM ---
-def send_alert(message, image_file):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    with open(image_file, 'rb') as f:
-        requests.post(url, files={'photo': f}, data={'chat_id': TELEGRAM_CHAT_ID, 'caption': message, 'parse_mode': 'Markdown'})
+# --- 6. SEND TELEGRAM (Split Messages) ---
+def send_telegram(price, rsi, trend, ai_msg, chart_file):
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+    
+    # 1. Send Chart First
+    if chart_file:
+        with open(chart_file, 'rb') as f:
+            requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
 
-# --- MAIN RUN ---
+    # 2. Send Text Second (Plain Text Mode - No Markdown Errors)
+    text = f"🛢 OIL UPDATE\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n🤖 AI SAYS:\n{ai_msg}"
+    requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
+
+# --- MAIN ---
 if __name__ == "__main__":
-    try:
-        print("Starting Bot...")
-        data, price, rsi, trend = get_market_data()
-        chart_file = create_chart_image(data)
+    print("Running...")
+    data, price, rsi, trend = get_market_data()
+    
+    if data is not None:
+        chart = create_chart(data)
         news = get_news()
-        analysis = ask_gemini(price, rsi, trend, news)
-        
-        msg = f"🛢 **WTI UPDATE**\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}"
-        send_alert(msg, chart_file)
-        print("Success!")
-    except Exception as e:
-        print(f"Error: {e}")
+        ai = ask_gemini(price, rsi, trend, news)
+        send_telegram(price, rsi, trend, ai, chart)
+        print("Sent successfully.")
+    else:
+        print("Failed to get data.")
