@@ -19,19 +19,16 @@ def get_market_data():
         data = yf.download(ticker, period="5d", interval="30m", progress=False)
         if data.empty: return None, 0, 0, "No Data"
         
-        # Cleanup Data Structure
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
         close = data["Close"]
         if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
         data["Close"] = close
 
-        # Indicators
         data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
         macd = MACD(close=data["Close"])
         data["MACD"] = macd.macd()
         data["Signal"] = macd.macd_signal()
         
-        # Latest
         price = data["Close"].iloc[-1]
         rsi = data["RSI"].iloc[-1]
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
@@ -48,61 +45,101 @@ def create_chart(data):
     mpf.plot(data.tail(40), type='candle', style='charles', volume=False, savefig=fname)
     return fname
 
-# --- 4. GET NEWS ---
+# --- 4. GET NEWS HEADLINES ---
 def get_news():
     try:
-        feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC&hl=en-US&gl=US&ceid=US:en")
-        return "\n".join([f"- {e.title}" for e in feed.entries[:3]])
+        # We search specifically for Oil, War, and OPEC news
+        feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+Conflict&hl=en-US&gl=US&ceid=US:en")
+        if not feed.entries: return []
+        # Return top 5 headlines
+        return [entry.title for entry in feed.entries[:5]]
     except:
-        return "News unavailable."
+        return []
 
-# --- 5. ASK AI (MODEL HUNTER) ---
-def ask_gemini(price, rsi, trend, news):
-    # We will try these models in order. The first one that works wins.
-    candidate_models = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-pro",
-        "gemini-1.0-pro"
-    ]
+# --- 5. HYBRID ANALYSIS ENGINE ---
+def analyze_market(price, rsi, trend, headlines):
     
-    prompt = f"Price: ${price:.2f}, RSI: {rsi:.2f}, Trend: {trend}. News: {news}. Buy or Sell WTI? Short answer."
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    # STEP A: Try Google AI (The Smart Brain)
+    try:
+        news_text = "\n".join([f"- {h}" for h in headlines])
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+        prompt = f"""
+        You are a hedge fund trader. 
+        Market Data: Price ${price:.2f}, RSI {rsi:.2f}, Trend {trend}.
+        News Headlines:
+        {news_text}
+        
+        Task: DECIDE to BUY or SELL. 
+        Logic: If news is about War/Attacks/OPEC Cuts -> BUY. If news is Peace/Economy bad -> SELL.
+        Output: A short, aggressive trading signal with emojis.
+        """
+        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
+        
+        if resp.status_code == 200:
+            return "🧠 **AI BRAIN ANALYSIS:**\n" + resp.json()['candidates'][0]['content']['parts'][0]['text']
+    except:
+        pass # If AI fails, we fall back to Step B silently
+    
+    # STEP B: The "News Sentiment Algo" (Backup Brain)
+    # This runs if Google AI is broken. It calculates a score based on words.
+    
+    score = 0
+    bullish_words = ["war", "attack", "conflict", "strike", "escalat", "cut", "opec", "shortage", "sanction", "tension"]
+    bearish_words = ["peace", "talks", "ceasefire", "deal", "supply", "rise", "increase", "recession", "weak", "surplus"]
+    
+    matches = []
+    
+    for headline in headlines:
+        lower_h = headline.lower()
+        # Check Bullish
+        for word in bullish_words:
+            if word in lower_h:
+                score += 1
+                matches.append(f"🔥 Bullish News: {word.upper()} found")
+                break
+        # Check Bearish
+        for word in bearish_words:
+            if word in lower_h:
+                score -= 1
+                matches.append(f"❄️ Bearish News: {word.upper()} found")
+                break
+                
+    # Final Decision Logic
+    signal = "WAIT ✋"
+    if score > 0: signal = "BUY 🟢 (War/Supply Risks)"
+    if score < 0: signal = "SELL 🔴 (Peace/Supply Glut)"
+    
+    # RSI Filters
+    if rsi < 30: signal = "BUY 🟢 (Oversold Bounce)"
+    if rsi > 70: signal = "SELL 🔴 (Overbought Drop)"
 
-    for model in candidate_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
-        try:
-            resp = requests.post(url, json=payload, headers={'Content-Type': 'application/json'})
-            if resp.status_code == 200:
-                return f"✅ ({model}): " + resp.json()['candidates'][0]['content']['parts'][0]['text']
-        except:
-            continue # Try the next model
-            
-    return "⚠️ All AI models failed. Please check Google AI Studio Terms of Service."
+    analysis_text = f"⚙️ **ALGO ANALYSIS (Backup):**\nSignal: **{signal}**\nNews Score: {score}\n\n"
+    if matches:
+        analysis_text += "📝 **Key News Factors:**\n" + "\n".join(matches)
+    else:
+        analysis_text += "No major war/peace keywords found in news."
+        
+    return analysis_text
 
 # --- 6. SEND TELEGRAM ---
-def send_telegram(price, rsi, trend, ai_msg, chart_file):
+def send_telegram(price, rsi, trend, analysis, chart_file):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
-    # 1. Send Chart
+    # Send Chart
     if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
 
-    # 2. Send Text
-    text = f"🛢 OIL UPDATE\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n🤖 AI SAYS:\n{ai_msg}"
+    # Send Analysis
+    text = f"🛢 **WTI INTELLIGENCE**\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN ---
 if __name__ == "__main__":
-    print("Running...")
     data, price, rsi, trend = get_market_data()
-    
     if data is not None:
         chart = create_chart(data)
-        news = get_news()
-        ai = ask_gemini(price, rsi, trend, news)
-        send_telegram(price, rsi, trend, ai, chart)
+        headlines = get_news()
+        analysis = analyze_market(price, rsi, trend, headlines)
+        send_telegram(price, rsi, trend, analysis, chart)
         print("Sent successfully.")
-    else:
-        print("Failed to get data.")
