@@ -56,28 +56,40 @@ def get_news():
     except:
         return "News unavailable."
 
-# --- 5. ASK AI (Robust Mode) ---
+# --- 5. ASK AI (MODEL HUNTER) ---
 def ask_gemini(price, rsi, trend, news):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-    prompt = f"Price: ${price:.2f}, RSI: {rsi:.2f}, Trend: {trend}. News: {news}. Should I BUY or SELL WTI Oil? Keep it short."
+    # We will try these models in order. The first one that works wins.
+    candidate_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro",
+        "gemini-1.0-pro"
+    ]
     
-    try:
-        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
-        if resp.status_code != 200: return f"⚠️ AI Napping (Status {resp.status_code})"
-        return resp.json()['candidates'][0]['content']['parts'][0]['text']
-    except Exception as e:
-        return f"⚠️ AI Error: {str(e)}"
+    prompt = f"Price: ${price:.2f}, RSI: {rsi:.2f}, Trend: {trend}. News: {news}. Buy or Sell WTI? Short answer."
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-# --- 6. SEND TELEGRAM (Split Messages) ---
+    for model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+        try:
+            resp = requests.post(url, json=payload, headers={'Content-Type': 'application/json'})
+            if resp.status_code == 200:
+                return f"✅ ({model}): " + resp.json()['candidates'][0]['content']['parts'][0]['text']
+        except:
+            continue # Try the next model
+            
+    return "⚠️ All AI models failed. Please check Google AI Studio Terms of Service."
+
+# --- 6. SEND TELEGRAM ---
 def send_telegram(price, rsi, trend, ai_msg, chart_file):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
-    # 1. Send Chart First
+    # 1. Send Chart
     if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
 
-    # 2. Send Text Second (Plain Text Mode - No Markdown Errors)
+    # 2. Send Text
     text = f"🛢 OIL UPDATE\nPrice: ${price:.2f}\nRSI: {rsi:.2f}\nTrend: {trend}\n\n🤖 AI SAYS:\n{ai_msg}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
