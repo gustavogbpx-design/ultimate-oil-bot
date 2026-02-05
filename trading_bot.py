@@ -53,57 +53,65 @@ def get_news():
     except:
         return []
 
-# --- 5. FIND THE CORRECT MODEL NAME ---
+# --- 5. FIND MODEL (THE LOGIC THAT WORKED) ---
 def get_valid_model():
-    # Ask Google: "List all models I can use"
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
     try:
         resp = requests.get(url)
         data = resp.json()
-        
-        # Look for a model that supports 'generateContent'
         if 'models' in data:
             for model in data['models']:
                 if 'generateContent' in model.get('supportedGenerationMethods', []):
-                    # We found a working model! Return its name (e.g., "models/gemini-pro")
                     return model['name']
     except:
         pass
-    return None
+    return "models/gemini-1.5-flash" # Fallback
 
-# --- 6. ANALYZE (AUTO-DISCOVERY MODE) ---
+# --- 6. ANALYZE (DETAILED HEDGE FUND MODE) ---
 def analyze_market(price, rsi, trend, headlines):
     
-    # STEP A: Find the correct model dynamically
+    # 1. Get the working model name
     model_name = get_valid_model()
     
-    if model_name:
-        try:
-            news_text = "\n".join([f"- {h}" for h in headlines])
-            # Use the model name we found (e.g., models/gemini-1.0-pro)
-            url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
-            prompt = f"Market: Price ${price}, Trend {trend}. News: {news_text}. Buy or Sell? Short answer."
-            
-            resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
-            
-            if resp.status_code == 200:
-                return f"🧠 **AI ANALYSIS ({model_name.split('/')[-1]}):**\n" + resp.json()['candidates'][0]['content']['parts'][0]['text']
-        except:
-            pass
-            
-    # STEP B: Fallback Algo (If AI truly fails)
-    score = 0
-    matches = []
-    keywords = {"WAR": 1, "CONFLICT": 1, "ATTACK": 1, "PEACE": -1, "TALKS": -1}
+    # 2. Prepare the Smart Prompt
+    news_text = "\n".join([f"- {h}" for h in headlines])
+    prompt = f"""
+    Act as a Wall Street Oil Trader.
     
-    for h in headlines:
-        for word, val in keywords.items():
-            if word in h.upper():
-                score += val
-                matches.append(word)
-                
-    signal = "BUY 🟢" if score > 0 else "SELL 🔴" if score < 0 else "WAIT ✋"
-    return f"⚙️ **BACKUP ALGO:**\nSignal: {signal}\nScore: {score}"
+    MARKET DATA:
+    - Price: ${price:.2f}
+    - RSI: {rsi:.2f} (30=Oversold, 70=Overbought)
+    - Trend: {trend}
+    
+    NEWS HEADLINES:
+    {news_text}
+    
+    TASK:
+    Analyze the data and news. Provide a detailed trading signal.
+    
+    OUTPUT FORMAT:
+    ACTION: [BUY / SELL / WAIT]
+    RISK: [LOW / HIGH]
+    
+    REASONING:
+    - [Bullet point 1]
+    - [Bullet point 2]
+    - [Bullet point 3]
+    """
+
+    # 3. Ask AI
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
+        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
+        if resp.status_code == 200:
+            ai_reply = resp.json()['candidates'][0]['content']['parts'][0]['text']
+            # Clean up formatting
+            return f"🧠 **AI ANALYSIS ({model_name.split('/')[-1]}):**\n{ai_reply}"
+    except:
+        pass
+
+    # 4. Backup Algo (Just in case)
+    return "⚠️ AI Silent. Using Math:\n" + ("BUY 🟢" if rsi < 30 else "SELL 🔴" if rsi > 70 else "WAIT ✋")
 
 # --- 7. SEND TELEGRAM ---
 def send_telegram(price, rsi, trend, analysis, chart_file):
