@@ -53,7 +53,7 @@ def get_news():
     except:
         return []
 
-# --- 5. FIND MODEL (THE LOGIC THAT WORKED) ---
+# --- 5. FIND MODEL ---
 def get_valid_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
     try:
@@ -65,52 +65,55 @@ def get_valid_model():
                     return model['name']
     except:
         pass
-    return "models/gemini-1.5-flash" # Fallback
+    return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (DETAILED HEDGE FUND MODE) ---
+# --- 6. ANALYZE (COMBINED MODE) ---
 def analyze_market(price, rsi, trend, headlines):
     
-    # 1. Get the working model name
     model_name = get_valid_model()
-    
-    # 2. Prepare the Smart Prompt
     news_text = "\n".join([f"- {h}" for h in headlines])
+    
+    # MASTER PROMPT: Asks for BOTH Numbers AND Logic
     prompt = f"""
-    Act as a Wall Street Oil Trader.
+    Act as a Senior Wall Street Trader.
     
     MARKET DATA:
     - Price: ${price:.2f}
-    - RSI: {rsi:.2f} (30=Oversold, 70=Overbought)
+    - RSI: {rsi:.2f}
     - Trend: {trend}
     
-    NEWS HEADLINES:
+    NEWS:
     {news_text}
     
     TASK:
-    Analyze the data and news. Provide a detailed trading signal.
+    1. Determine the best trade setup (Scalp or Swing).
+    2. Provide specific entry, stop loss, and take profit.
+    3. Explain WHY based on news and technicals.
     
-    OUTPUT FORMAT:
-    ACTION: [BUY / SELL / WAIT]
-    RISK: [LOW / HIGH]
+    OUTPUT FORMAT (Strictly follow this):
     
-    REASONING:
-    - [Bullet point 1]
-    - [Bullet point 2]
-    - [Bullet point 3]
+    💎 **TRADE SETUP**
+    Action: [BUY / SELL / WAIT]
+    Entry: ${price:.2f}
+    🛑 Stop Loss: [Price]
+    🎯 Take Profit: [Price]
+    
+    📊 **DEEP ANALYSIS**
+    Risk Level: [Low/Med/High]
+    Reasoning:
+    - [Point 1: Technicals]
+    - [Point 2: News/Geopolitics]
     """
 
-    # 3. Ask AI
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
         resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
         if resp.status_code == 200:
             ai_reply = resp.json()['candidates'][0]['content']['parts'][0]['text']
-            # Clean up formatting
-            return f"🧠 **AI ANALYSIS ({model_name.split('/')[-1]}):**\n{ai_reply}"
+            return f"🧠 **AI SIGNAL ({model_name.split('/')[-1]}):**\n{ai_reply}"
     except:
         pass
 
-    # 4. Backup Algo (Just in case)
     return "⚠️ AI Silent. Using Math:\n" + ("BUY 🟢" if rsi < 30 else "SELL 🔴" if rsi > 70 else "WAIT ✋")
 
 # --- 7. SEND TELEGRAM ---
@@ -120,7 +123,7 @@ def send_telegram(price, rsi, trend, analysis, chart_file):
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🛢 **WTI REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    text = f"🛢 **WTI MASTER REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN ---
