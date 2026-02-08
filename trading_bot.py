@@ -14,12 +14,18 @@ GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Global History for volatility tracking
-price_history = [] 
+# --- ASSET LIST ---
+# We now watch TWO targets:
+ASSETS = {
+    "WTI Oil": "CL=F",
+    "Gold": "GC=F"
+}
+
+# Global History for volatility tracking (Separate memory for each asset)
+price_history = {"WTI Oil": [], "Gold": []}
 
 # --- DATA FETCHING ---
-def get_market_data():
-    ticker = "CL=F" # WTI Crude Oil
+def get_market_data(ticker):
     try:
         # Download 5 Days of 30-min candles
         data = yf.download(ticker, period="5d", interval="30m", progress=False)
@@ -58,77 +64,72 @@ def get_market_data():
         return data, price, rsi, trend, atr, ema200
         
     except Exception as e:
-        print(f"Data Error: {e}")
+        print(f"Data Error ({ticker}): {e}")
         return None, 0, 0, "Error", 0, 0
 
 # --- CHART GENERATION ---
-def create_chart(data):
+def create_chart(data, asset_name):
     if data is None: return None
-    fname = "oil_chart.png"
-    # Adds 50 and 200 Moving Averages to the chart visual
+    fname = f"{asset_name.replace(' ', '_')}_chart.png"
     mpf.plot(data.tail(50), type='candle', style='charles', volume=False, 
-             mav=(50, 200), savefig=fname)
+             mav=(50, 200), title=f"{asset_name} Analysis", savefig=fname)
     return fname
 
 # --- NEWS FETCHING ---
-def get_news():
+def get_news(asset_name):
+    search_term = "Crude+Oil" if "Oil" in asset_name else "Gold+Price"
     try:
-        feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+Conflict&hl=en-US&gl=US&ceid=US:en")
+        feed = feedparser.parse(f"https://news.google.com/rss/search?q={search_term}&hl=en-US&gl=US&ceid=US:en")
         if not feed.entries: return []
-        return [entry.title for entry in feed.entries[:5]]
+        return [entry.title for entry in feed.entries[:3]] # Top 3 headlines
     except:
         return []
 
 # --- AI ANALYSIS ---
-def analyze_market(price, rsi, trend, atr, ema200, headlines):
+def analyze_market(asset, price, rsi, trend, atr, ema200, headlines):
     
     # --- MATH: Dynamic Stop Loss Calculation ---
-    # Volatility Adjustment: Wider stops when ATR is high
     stop_loss_buy = price - (2.0 * atr)
-    take_profit_buy = price + (3.0 * atr) # 1.5 Risk/Reward Ratio
+    take_profit_buy = price + (3.0 * atr) 
     
     stop_loss_sell = price + (2.0 * atr)
     take_profit_sell = price - (3.0 * atr)
     
-    # Trend Filter Status
     ema_status = "ABOVE 200 EMA (Uptrend)" if price > ema200 else "BELOW 200 EMA (Downtrend)"
-
     news_text = "\n".join([f"- {h}" for h in headlines])
     
     # PROMPT
     prompt = f"""
-    Act as a Senior Risk Manager at a Hedge Fund.
+    Act as a Senior Hedge Fund Trader.
     
-    MARKET DATA (WTI Oil):
+    ASSET: {asset}
     - Price: ${price:.2f}
     - RSI: {rsi:.2f} (Overbought > 70, Oversold < 30)
     - Trend: {trend}
     - EMA Context: {ema_status}
     - Volatility (ATR): {atr:.2f}
     
-    CALCULATED RISK LIMITS (Based on ATR):
-    - Suggested BUY Stop Loss: ${stop_loss_buy:.2f}
-    - Suggested SELL Stop Loss: ${stop_loss_sell:.2f}
+    RISK LIMITS (ATR Based):
+    - Suggested BUY Stop: ${stop_loss_buy:.2f}
+    - Suggested SELL Stop: ${stop_loss_sell:.2f}
     
-    NEWS HEADLINES:
+    NEWS:
     {news_text}
     
     TASK:
-    Analyze the setup. Recommend a trade only if risk is manageable.
+    Analyze the setup. Is this a high-quality trade?
     
     OUTPUT FORMAT:
     
-    💎 **TRADE SIGNAL**
+    💎 **{asset.upper()} SIGNAL**
     Action: [BUY / SELL / WAIT]
     Entry: ${price:.2f}
-    🛡️ Smart Stop Loss: [Use calculated value]
-    🎯 Target: [Use calculated value]
+    🛡️ Stop Loss: [Calculated Value]
+    🎯 Target: [Calculated Value]
     
-    📊 **RISK ASSESSMENT**
+    📊 **ANALYSIS**
     Risk Level: [Low/Med/High]
-    Reasoning:
-    - [Technical Analysis]
-    - [News Sentiment]
+    Reasoning: [1-2 sentences on technicals & news]
     """
     
     try:
@@ -142,57 +143,59 @@ def analyze_market(price, rsi, trend, atr, ema200, headlines):
     return "⚠️ AI Analysis Unavailable."
 
 # --- TELEGRAM SENDER ---
-def send_telegram(price, analysis, chart_file, alert_reason):
+def send_telegram(asset, price, analysis, chart_file, alert_reason):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🚨 **MARKET ALERT ({alert_reason})**\nPrice: ${price:.2f}\n\n{analysis}"
+    text = f"🚨 **{asset.upper()} ALERT ({alert_reason})**\nPrice: ${price:.2f}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Professional Trading Bot Started (ATR + 200 EMA Mode)...")
+    print("🚀 Golden Sniper Mode Activated (Oil + Gold)...")
     
     while True:
         try:
-            print("Analyzing market structure...")
-            data, price, rsi, trend, atr, ema200 = get_market_data()
-            
-            if data is not None:
-                # 1. Update Price History for Volatility Check
-                current_time = time.time()
-                price_history.append((current_time, price))
-                price_history = [p for p in price_history if current_time - p[0] <= 3600]
+            for asset_name, ticker in ASSETS.items():
+                print(f"🔍 Scanning {asset_name}...")
+                data, price, rsi, trend, atr, ema200 = get_market_data(ticker)
                 
-                # 2. Check for Sudden Price Shock ($1 Move in 1 Hour)
-                start_price = price_history[0][1]
-                price_change = abs(price - start_price)
-                is_volatile = price_change >= 1.0
+                if data is not None:
+                    # 1. Update Price History (Specific to this asset)
+                    current_time = time.time()
+                    price_history[asset_name].append((current_time, price))
+                    price_history[asset_name] = [p for p in price_history[asset_name] if current_time - p[0] <= 3600]
+                    
+                    # 2. Check Volatility (Custom thresholds: Oil $1.00, Gold $10.00)
+                    start_price = price_history[asset_name][0][1]
+                    price_change = abs(price - start_price)
+                    
+                    volatility_threshold = 1.0 if asset_name == "WTI Oil" else 10.0
+                    is_volatile = price_change >= volatility_threshold
 
-                # 3. Analyze
-                headlines = get_news()
-                chart = create_chart(data)
-                analysis = analyze_market(price, rsi, trend, atr, ema200, headlines)
+                    # 3. Analyze
+                    headlines = get_news(asset_name)
+                    chart = create_chart(data, asset_name)
+                    analysis = analyze_market(asset_name, price, rsi, trend, atr, ema200, headlines)
 
-                # 4. Filter: Only Send if Low/Med Risk OR High Volatility
-                is_safe = "Risk Level: Low" in analysis or "Risk Level: Medium" in analysis
-                
-                if is_safe:
-                    print("✅ High Quality Setup Detected. Sending Report...")
-                    send_telegram(price, analysis, chart, "Trade Opportunity")
-                elif is_volatile:
-                    print(f"⚠️ Market Shock Detected! Price moved ${price_change:.2f}")
-                    send_telegram(price, analysis, chart, "Volatility Alert")
-                else:
-                    print("⏳ Market is choppy/risky. Waiting for better setup.")
+                    # 4. Filter
+                    is_safe = "Risk Level: Low" in analysis or "Risk Level: Medium" in analysis
+                    
+                    if is_safe:
+                        print(f"✅ {asset_name}: Good Setup.")
+                        send_telegram(asset_name, price, analysis, chart, "Opportunity")
+                    elif is_volatile:
+                        print(f"⚠️ {asset_name}: High Volatility!")
+                        send_telegram(asset_name, price, analysis, chart, "Big Move")
+                    else:
+                        print(f"zzz {asset_name}: No clear trade.")
 
-            else:
-                print("❌ Data Feed Error.")
+                time.sleep(5) # Small pause between assets
 
         except Exception as e:
-            print(f"⚠️ Runtime Error: {e}")
+            print(f"⚠️ Loop Error: {e}")
         
         # Wait 10 Minutes
         print("⏳ Next scan in 10 minutes...")
