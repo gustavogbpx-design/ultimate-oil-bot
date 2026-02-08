@@ -69,7 +69,7 @@ def get_news(asset_name):
     except:
         return []
 
-# --- AI ANALYSIS ---
+# --- AI ANALYSIS (DEBUG VERSION) ---
 def analyze_market(asset, price, rsi, trend, atr, ema200, headlines):
     
     stop_loss_buy = price - (2.0 * atr)
@@ -105,14 +105,23 @@ def analyze_market(asset, price, rsi, trend, atr, ema200, headlines):
     """
     
     try:
+        # Check if Key is missing immediately
+        if not GEMINI_KEY:
+            return "⚠️ CRITICAL ERROR: API Key is missing! Check Railway Variables."
+
         model_name = "models/gemini-1.5-flash"
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
         resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
+        
+        # --- NEW DEBUGGING LOGIC ---
         if resp.status_code == 200:
             return resp.json()['candidates'][0]['content']['parts'][0]['text']
-    except:
-        pass
-    return "⚠️ AI Silent."
+        else:
+            # This will show the EXACT error from Google in your Telegram
+            return f"⚠️ GOOGLE ERROR {resp.status_code}:\n{resp.text}"
+            
+    except Exception as e:
+        return f"⚠️ PYTHON ERROR: {e}"
 
 # --- SEND TELEGRAM ---
 def send_telegram(asset, price, analysis, chart_file):
@@ -121,12 +130,12 @@ def send_telegram(asset, price, analysis, chart_file):
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🏋️ **TRAINING REPORT ({asset})**\nPrice: ${price:.2f}\n\n{analysis}"
+    text = f"🏋️ **DEBUG REPORT ({asset})**\nPrice: ${price:.2f}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
-# --- MAIN LOOP (UNFILTERED) ---
+# --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Training Mode Started (No Filters, Message Every 10 Mins)...")
+    print("🚀 Debug Mode Started...")
     
     while True:
         try:
@@ -135,20 +144,17 @@ if __name__ == "__main__":
                 data, price, rsi, trend, atr, ema200 = get_market_data(ticker)
                 
                 if data is not None:
-                    # 1. Get Intel
                     headlines = get_news(asset_name)
                     chart = create_chart(data, asset_name)
                     analysis = analyze_market(asset_name, price, rsi, trend, atr, ema200, headlines)
 
-                    # 2. SEND IT (No IF statements, just SEND)
                     print(f"✅ Sending report for {asset_name}...")
                     send_telegram(asset_name, price, analysis, chart)
                 
-                time.sleep(5) # Short pause between assets
+                time.sleep(5) 
 
         except Exception as e:
             print(f"⚠️ Error: {e}")
         
-        # Wait 10 Minutes
-        print("⏳ Waiting 10 minutes for next round...")
+        print("⏳ Waiting 10 minutes...")
         time.sleep(600)
