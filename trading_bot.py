@@ -13,7 +13,10 @@ GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 2. GET DATA ---
+# --- 2. GLOBAL SETTINGS ---
+price_history = []  # To track price changes over 1 hour
+
+# --- 3. GET DATA ---
 def get_market_data():
     ticker = "CL=F"
     try:
@@ -39,14 +42,14 @@ def get_market_data():
         print(f"Data Error: {e}")
         return None, 0, 0, "Error"
 
-# --- 3. DRAW CHART ---
+# --- 4. DRAW CHART ---
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
     mpf.plot(data.tail(40), type='candle', style='charles', volume=False, savefig=fname)
     return fname
 
-# --- 4. GET NEWS ---
+# --- 5. GET NEWS ---
 def get_news():
     try:
         feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+Conflict&hl=en-US&gl=US&ceid=US:en")
@@ -55,7 +58,7 @@ def get_news():
     except:
         return []
 
-# --- 5. FIND MODEL ---
+# --- 6. FIND MODEL ---
 def get_valid_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
     try:
@@ -69,12 +72,11 @@ def get_valid_model():
         pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (RICH AI MODE) ---
+# --- 7. ANALYZE (RICH AI MODE) ---
 def analyze_market(price, rsi, trend, headlines):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
     
-    # MASTER PROMPT: Asks for BOTH Numbers AND Logic
     prompt = f"""
     Act as a Senior Wall Street Trader.
     
@@ -87,9 +89,7 @@ def analyze_market(price, rsi, trend, headlines):
     {news_text}
     
     TASK:
-    1. Determine the best trade setup (Scalp or Swing).
-    2. Provide specific entry, stop loss, and take profit.
-    3. Explain WHY based on news and technicals.
+    Analyze the setup.
     
     OUTPUT FORMAT (Strictly follow this):
     
@@ -100,50 +100,78 @@ def analyze_market(price, rsi, trend, headlines):
     🎯 Take Profit: [Price]
     
     📊 **DEEP ANALYSIS**
-    Risk Level: [Low/Med/High]
+    Risk Level: [Low / Medium / High]
     Reasoning:
-    - [Point 1: Technicals]
-    - [Point 2: News/Geopolitics]
+    - [Technicals]
+    - [News]
     """
 
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
         resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
         if resp.status_code == 200:
-            ai_reply = resp.json()['candidates'][0]['content']['parts'][0]['text']
-            return f"🧠 **AI SIGNAL ({model_name.split('/')[-1]}):**\n{ai_reply}"
-        else:
-            return f"⚠️ AI Error: {resp.status_code} - {resp.text}"
-    except Exception as e:
-        return f"⚠️ AI Connection Failed: {e}"
+            return resp.json()['candidates'][0]['content']['parts'][0]['text']
+    except:
+        pass
+    return "Analysis Failed"
 
-# --- 7. SEND TELEGRAM ---
-def send_telegram(price, rsi, trend, analysis, chart_file):
+# --- 8. SEND TELEGRAM ---
+def send_telegram(price, trend, analysis, chart_file, alert_reason):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🛢 **WTI MASTER REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    text = f"🚨 **WTI ALERT ({alert_reason})**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN LOOP (RUNS FOREVER) ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in 24/7 Master Mode...")
+    print("🚀 Bot Started (Filter Mode: Low/Med Risk OR $1 Move)...")
+    
     while True:
         try:
-            print("Analyzing market...")
+            print("Checking market...")
             data, price, rsi, trend = get_market_data()
+            
             if data is not None:
-                chart = create_chart(data)
+                # 1. Update Price History (Keep last 1 hour)
+                current_time = time.time()
+                price_history.append((current_time, price))
+                # Remove data older than 1 hour (3600 seconds)
+                price_history = [p for p in price_history if current_time - p[0] <= 3600]
+                
+                # 2. Check Price Move ($1 in 1 hour)
+                start_price = price_history[0][1] # Oldest price in memory
+                price_change = abs(price - start_price)
+                is_volatile = price_change >= 1.0
+
+                # 3. Get AI Analysis
                 headlines = get_news()
                 analysis = analyze_market(price, rsi, trend, headlines)
-                send_telegram(price, rsi, trend, analysis, chart)
-                print("✅ Report Sent!")
+                chart = create_chart(data)
+
+                # 4. Check Risk Level (Low/Medium)
+                is_safe_risk = "Risk Level: Low" in analysis or "Risk Level: Medium" in analysis or "Risk Level: Med" in analysis
+                
+                # --- DECISION FILTER ---
+                if is_safe_risk:
+                    print("✅ Sending Alert: Good Risk Level.")
+                    send_telegram(price, trend, analysis, chart, "Opportunity")
+                
+                elif is_volatile:
+                    print(f"⚠️ Sending Alert: Big Move (${price_change:.2f})")
+                    send_telegram(price, trend, analysis, chart, "Big Volatility")
+                
+                else:
+                    print(f"zzz... Skipping. (Risk is High & Move is only ${price_change:.2f})")
+
             else:
                 print("❌ No data received.")
+
         except Exception as e:
             print(f"⚠️ Crash prevention: {e}")
         
-        print("💤 Sleeping for 15 minutes...")
-        time.sleep(900)
+        # SLEEP FOR 10 MINUTES (600 seconds)
+        print("⏳ Waiting 10 minutes...")
+        time.sleep(600)
