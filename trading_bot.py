@@ -174,4 +174,4 @@ if __name__ == "__main__":
         
         # SLEEP FOR 10 MINUTES (600 seconds)
         print("⏳ Waiting 10 minutes...")
-        time.sleep(600)
+        time.sleep(660)
