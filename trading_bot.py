@@ -1,5 +1,4 @@
 import os
-import time
 import yfinance as yf
 import requests
 import feedparser
@@ -9,9 +8,9 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD
 
 # --- 1. SETUP KEYS ---
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GEMINI_KEY = os.environ["GEMINI_API_KEY"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 # --- 2. GET DATA ---
 def get_market_data():
@@ -36,8 +35,7 @@ def get_market_data():
         
         return data, price, rsi, trend
     except Exception as e:
-        print(f"Data Error: {e}")
-        return None, 0, 0, "Error"
+        return None, 0, 0, f"Data Error: {str(e)}"
 
 # --- 3. DRAW CHART ---
 def create_chart(data):
@@ -69,8 +67,9 @@ def get_valid_model():
         pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (RICH AI MODE) ---
+# --- 6. ANALYZE (COMBINED MODE) ---
 def analyze_market(price, rsi, trend, headlines):
+    
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
     
@@ -112,10 +111,10 @@ def analyze_market(price, rsi, trend, headlines):
         if resp.status_code == 200:
             ai_reply = resp.json()['candidates'][0]['content']['parts'][0]['text']
             return f"🧠 **AI SIGNAL ({model_name.split('/')[-1]}):**\n{ai_reply}"
-        else:
-            return f"⚠️ AI Error: {resp.status_code} - {resp.text}"
-    except Exception as e:
-        return f"⚠️ AI Connection Failed: {e}"
+    except:
+        pass
+
+    return "⚠️ AI Silent. Using Math:\n" + ("BUY 🟢" if rsi < 30 else "SELL 🔴" if rsi > 70 else "WAIT ✋")
 
 # --- 7. SEND TELEGRAM ---
 def send_telegram(price, rsi, trend, analysis, chart_file):
@@ -127,23 +126,11 @@ def send_telegram(price, rsi, trend, analysis, chart_file):
     text = f"🛢 **WTI MASTER REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
-# --- MAIN LOOP (RUNS FOREVER) ---
+# --- MAIN ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in 24/7 Master Mode...")
-    while True:
-        try:
-            print("Analyzing market...")
-            data, price, rsi, trend = get_market_data()
-            if data is not None:
-                chart = create_chart(data)
-                headlines = get_news()
-                analysis = analyze_market(price, rsi, trend, headlines)
-                send_telegram(price, rsi, trend, analysis, chart)
-                print("✅ Report Sent!")
-            else:
-                print("❌ No data received.")
-        except Exception as e:
-            print(f"⚠️ Crash prevention: {e}")
-        
-        print("💤 Sleeping for 15 minutes...")
-        time.sleep(900)
+    data, price, rsi, trend = get_market_data()
+    if data is not None:
+        chart = create_chart(data)
+        headlines = get_news()
+        analysis = analyze_market(price, rsi, trend, headlines)
+        send_telegram(price, rsi, trend, analysis, chart)
