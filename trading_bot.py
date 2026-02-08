@@ -6,50 +6,71 @@ import feedparser
 import pandas as pd
 import mplfinance as mpf
 from ta.momentum import RSIIndicator
-from ta.trend import MACD
+from ta.trend import MACD, EMAIndicator
+from ta.volatility import AverageTrueRange
 
-# --- 1. SETUP KEYS ---
+# --- CONFIGURATION ---
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 2. GLOBAL SETTINGS ---
-price_history = []  # To track price changes over 1 hour
+# Global History for volatility tracking
+price_history = [] 
 
-# --- 3. GET DATA ---
+# --- DATA FETCHING ---
 def get_market_data():
-    ticker = "CL=F"
+    ticker = "CL=F" # WTI Crude Oil
     try:
+        # Download 5 Days of 30-min candles
         data = yf.download(ticker, period="5d", interval="30m", progress=False)
-        if data.empty: return None, 0, 0, "No Data"
+        if data.empty: return None, 0, 0, 0, 0, "No Signal"
         
+        # Clean Data Format
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
         close = data["Close"]
         if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
         data["Close"] = close
-
+        
+        # --- TECHNICAL INDICATORS ---
+        # 1. RSI (Momentum)
         data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
+        
+        # 2. MACD (Trend Momentum)
         macd = MACD(close=data["Close"])
         data["MACD"] = macd.macd()
         data["Signal"] = macd.macd_signal()
         
+        # 3. 200 EMA (Long Term Trend Filter)
+        data["EMA200"] = EMAIndicator(close=data["Close"], window=200).ema_indicator()
+        
+        # 4. ATR (Volatility / Risk Measurement)
+        data["ATR"] = AverageTrueRange(high=data["High"], low=data["Low"], close=data["Close"], window=14).average_true_range()
+        
+        # Get latest values
         price = data["Close"].iloc[-1]
         rsi = data["RSI"].iloc[-1]
+        atr = data["ATR"].iloc[-1]
+        ema200 = data["EMA200"].iloc[-1]
+        
+        # Determine Trend
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
         
-        return data, price, rsi, trend
+        return data, price, rsi, trend, atr, ema200
+        
     except Exception as e:
         print(f"Data Error: {e}")
-        return None, 0, 0, "Error"
+        return None, 0, 0, "Error", 0, 0
 
-# --- 4. DRAW CHART ---
+# --- CHART GENERATION ---
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
-    mpf.plot(data.tail(40), type='candle', style='charles', volume=False, savefig=fname)
+    # Adds 50 and 200 Moving Averages to the chart visual
+    mpf.plot(data.tail(50), type='candle', style='charles', volume=False, 
+             mav=(50, 200), savefig=fname)
     return fname
 
-# --- 5. GET NEWS ---
+# --- NEWS FETCHING ---
 def get_news():
     try:
         feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+Conflict&hl=en-US&gl=US&ceid=US:en")
@@ -58,120 +79,121 @@ def get_news():
     except:
         return []
 
-# --- 6. FIND MODEL ---
-def get_valid_model():
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
-    try:
-        resp = requests.get(url)
-        data = resp.json()
-        if 'models' in data:
-            for model in data['models']:
-                if 'generateContent' in model.get('supportedGenerationMethods', []):
-                    return model['name']
-    except:
-        pass
-    return "models/gemini-1.5-flash"
+# --- AI ANALYSIS ---
+def analyze_market(price, rsi, trend, atr, ema200, headlines):
+    
+    # --- MATH: Dynamic Stop Loss Calculation ---
+    # Volatility Adjustment: Wider stops when ATR is high
+    stop_loss_buy = price - (2.0 * atr)
+    take_profit_buy = price + (3.0 * atr) # 1.5 Risk/Reward Ratio
+    
+    stop_loss_sell = price + (2.0 * atr)
+    take_profit_sell = price - (3.0 * atr)
+    
+    # Trend Filter Status
+    ema_status = "ABOVE 200 EMA (Uptrend)" if price > ema200 else "BELOW 200 EMA (Downtrend)"
 
-# --- 7. ANALYZE (RICH AI MODE) ---
-def analyze_market(price, rsi, trend, headlines):
-    model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
     
+    # PROMPT
     prompt = f"""
-    Act as a Senior Wall Street Trader.
+    Act as a Senior Risk Manager at a Hedge Fund.
     
-    MARKET DATA:
+    MARKET DATA (WTI Oil):
     - Price: ${price:.2f}
-    - RSI: {rsi:.2f}
+    - RSI: {rsi:.2f} (Overbought > 70, Oversold < 30)
     - Trend: {trend}
+    - EMA Context: {ema_status}
+    - Volatility (ATR): {atr:.2f}
     
-    NEWS:
+    CALCULATED RISK LIMITS (Based on ATR):
+    - Suggested BUY Stop Loss: ${stop_loss_buy:.2f}
+    - Suggested SELL Stop Loss: ${stop_loss_sell:.2f}
+    
+    NEWS HEADLINES:
     {news_text}
     
     TASK:
-    Analyze the setup.
+    Analyze the setup. Recommend a trade only if risk is manageable.
     
-    OUTPUT FORMAT (Strictly follow this):
+    OUTPUT FORMAT:
     
-    💎 **TRADE SETUP**
+    💎 **TRADE SIGNAL**
     Action: [BUY / SELL / WAIT]
     Entry: ${price:.2f}
-    🛑 Stop Loss: [Price]
-    🎯 Take Profit: [Price]
+    🛡️ Smart Stop Loss: [Use calculated value]
+    🎯 Target: [Use calculated value]
     
-    📊 **DEEP ANALYSIS**
-    Risk Level: [Low / Medium / High]
+    📊 **RISK ASSESSMENT**
+    Risk Level: [Low/Med/High]
     Reasoning:
-    - [Technicals]
-    - [News]
+    - [Technical Analysis]
+    - [News Sentiment]
     """
-
+    
     try:
+        model_name = "models/gemini-1.5-flash"
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
         resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
         if resp.status_code == 200:
             return resp.json()['candidates'][0]['content']['parts'][0]['text']
     except:
         pass
-    return "Analysis Failed"
+    return "⚠️ AI Analysis Unavailable."
 
-# --- 8. SEND TELEGRAM ---
-def send_telegram(price, trend, analysis, chart_file, alert_reason):
+# --- TELEGRAM SENDER ---
+def send_telegram(price, analysis, chart_file, alert_reason):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🚨 **WTI ALERT ({alert_reason})**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    text = f"🚨 **MARKET ALERT ({alert_reason})**\nPrice: ${price:.2f}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
-# --- MAIN LOOP (RUNS FOREVER) ---
+# --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started (Filter Mode: Low/Med Risk OR $1 Move)...")
+    print("🚀 Professional Trading Bot Started (ATR + 200 EMA Mode)...")
     
     while True:
         try:
-            print("Checking market...")
-            data, price, rsi, trend = get_market_data()
+            print("Analyzing market structure...")
+            data, price, rsi, trend, atr, ema200 = get_market_data()
             
             if data is not None:
-                # 1. Update Price History (Keep last 1 hour)
+                # 1. Update Price History for Volatility Check
                 current_time = time.time()
                 price_history.append((current_time, price))
-                # Remove data older than 1 hour (3600 seconds)
                 price_history = [p for p in price_history if current_time - p[0] <= 3600]
                 
-                # 2. Check Price Move ($1 in 1 hour)
-                start_price = price_history[0][1] # Oldest price in memory
+                # 2. Check for Sudden Price Shock ($1 Move in 1 Hour)
+                start_price = price_history[0][1]
                 price_change = abs(price - start_price)
                 is_volatile = price_change >= 1.0
 
-                # 3. Get AI Analysis
+                # 3. Analyze
                 headlines = get_news()
-                analysis = analyze_market(price, rsi, trend, headlines)
                 chart = create_chart(data)
+                analysis = analyze_market(price, rsi, trend, atr, ema200, headlines)
 
-                # 4. Check Risk Level (Low/Medium)
-                is_safe_risk = "Risk Level: Low" in analysis or "Risk Level: Medium" in analysis or "Risk Level: Med" in analysis
+                # 4. Filter: Only Send if Low/Med Risk OR High Volatility
+                is_safe = "Risk Level: Low" in analysis or "Risk Level: Medium" in analysis
                 
-                # --- DECISION FILTER ---
-                if is_safe_risk:
-                    print("✅ Sending Alert: Good Risk Level.")
-                    send_telegram(price, trend, analysis, chart, "Opportunity")
-                
+                if is_safe:
+                    print("✅ High Quality Setup Detected. Sending Report...")
+                    send_telegram(price, analysis, chart, "Trade Opportunity")
                 elif is_volatile:
-                    print(f"⚠️ Sending Alert: Big Move (${price_change:.2f})")
-                    send_telegram(price, trend, analysis, chart, "Big Volatility")
-                
+                    print(f"⚠️ Market Shock Detected! Price moved ${price_change:.2f}")
+                    send_telegram(price, analysis, chart, "Volatility Alert")
                 else:
-                    print(f"zzz... Skipping. (Risk is High & Move is only ${price_change:.2f})")
+                    print("⏳ Market is choppy/risky. Waiting for better setup.")
 
             else:
-                print("❌ No data received.")
+                print("❌ Data Feed Error.")
 
         except Exception as e:
-            print(f"⚠️ Crash prevention: {e}")
+            print(f"⚠️ Runtime Error: {e}")
         
-        # SLEEP FOR 10 MINUTES (600 seconds)
-        print("⏳ Waiting 10 minutes...")
-        time.sleep(660)
+        # Wait 10 Minutes
+        print("⏳ Next scan in 10 minutes...")
+        time.sleep(600)
