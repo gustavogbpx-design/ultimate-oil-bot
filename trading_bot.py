@@ -146,4 +146,4 @@ if __name__ == "__main__":
             print(f"⚠️ Crash prevention: {e}")
         
         print("💤 Sleeping for 15 minutes...")
-        time.sleep(900)
+        time.sleep(1800)
