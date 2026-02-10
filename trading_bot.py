@@ -11,9 +11,9 @@ from ta.volatility import AverageTrueRange
 import json
 
 # --- 1. SETUP KEYS (FAILOVER SYSTEM) ---
-# Enter your two distinct API keys here
-GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1") # Primary Paid Account
-GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2") # Backup Paid Account
+# FIXED: Matches your Railway Environment Variables exactly
+GEMINI_KEY_1 = os.environ.get("GEMINI_KEY_1") 
+GEMINI_KEY_2 = os.environ.get("GEMINI_KEY_2") 
 
 # We put them in a list to loop through them
 API_KEYS = [key for key in [GEMINI_KEY_1, GEMINI_KEY_2] if key]
@@ -161,7 +161,8 @@ def send_telegram(price, trend, analysis, chart_file):
 if __name__ == "__main__":
     if not API_KEYS:
         print("❌ CRITICAL ERROR: No Gemini API Keys found. Check your environment variables.")
-        exit()
+        # We don't exit here anymore to prevent the container from crashing loops
+        # It will just print errors until you fix the variables
         
     print(f"🚀 Bot Started using {len(API_KEYS)} API Keys for Redundancy.")
     
