@@ -1,24 +1,30 @@
 import os
 import time
-import yfinance as yf
 import requests
 import feedparser
 import pandas as pd
 import mplfinance as mpf
+import yfinance as yf
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
+import json
 
-# --- 1. SETUP KEYS ---
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+# --- 1. SETUP KEYS (FAILOVER SYSTEM) ---
+# Enter your two distinct API keys here
+GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1") # Primary Paid Account
+GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2") # Backup Paid Account
+
+# We put them in a list to loop through them
+API_KEYS = [key for key in [GEMINI_KEY_1, GEMINI_KEY_2] if key]
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 2. GET DATA (UPDATED WITH ATR & EMA) ---
+# --- 2. GET DATA ---
 def get_market_data():
     ticker = "CL=F"
     try:
-        # Download 5 Days of 30-min candles
         data = yf.download(ticker, period="5d", interval="30m", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0
         
@@ -28,27 +34,19 @@ def get_market_data():
         if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
         data["Close"] = close
 
-        # --- INDICATORS ---
-        # 1. RSI
+        # Indicators
         data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
-        
-        # 2. MACD
         macd = MACD(close=data["Close"])
         data["MACD"] = macd.macd()
         data["Signal"] = macd.macd_signal()
-        
-        # 3. ATR (New: Volatility)
         data["ATR"] = AverageTrueRange(high=data["High"], low=data["Low"], close=data["Close"], window=14).average_true_range()
-        
-        # 4. EMA (New: Trend Filter)
         data["EMA200"] = EMAIndicator(close=data["Close"], window=200).ema_indicator()
         
-        # Get Latest Values
+        # Latest Values
         price = data["Close"].iloc[-1]
         rsi = data["RSI"].iloc[-1]
         atr = data["ATR"].iloc[-1]
         ema200 = data["EMA200"].iloc[-1]
-        
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
         
         return data, price, rsi, trend, atr, ema200
@@ -61,8 +59,7 @@ def get_market_data():
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
-    # Added MAV=(50, 200) to see the EMA lines on the chart
-    mpf.plot(data.tail(50), type='candle', style='charles', volume=False, mav=(50, 200), savefig=fname)
+    mpf.plot(data.tail(50), type='candle', style='charles', mav=(50, 200), savefig=fname)
     return fname
 
 # --- 4. GET NEWS ---
@@ -74,64 +71,30 @@ def get_news():
     except:
         return []
 
-# --- 5. FIND MODEL (YOUR PREFERRED METHOD) ---
-def get_valid_model():
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
-    try:
-        # Dynamically ask Google which models are available
-        resp = requests.get(url)
-        data = resp.json()
-        if 'models' in data:
-            for model in data['models']:
-                if 'generateContent' in model.get('supportedGenerationMethods', []):
-                    # Prefer 1.5-flash if available, but take what works
-                    if "flash" in model['name']:
-                        return model['name']
-            # Fallback to the first available one if Flash isn't found
-            return data['models'][0]['name']
-    except:
-        pass
-    # Absolute backup
-    return "models/gemini-1.5-flash"
+# --- 5. FIND MODEL HELPER ---
+def get_model_url(api_key):
+    # This function constructs the URL for a specific key
+    return f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
 
-# --- 6. ANALYZE (BEST LOGIC + PHASE 1 MATH) ---
+# --- 6. ANALYZE (WITH KEY ROTATION) ---
 def analyze_market(price, rsi, trend, atr, ema200, headlines):
-    model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
     
-    # --- MATH: Calculate Smart Stops (Phase 1) ---
+    # Calculate Stops
     stop_loss_buy = price - (2.0 * atr)
     take_profit_buy = price + (3.0 * atr)
     stop_loss_sell = price + (2.0 * atr) 
     take_profit_sell = price - (3.0 * atr)
-    
     ema_status = "Price is ABOVE 200 EMA (Uptrend)" if price > ema200 else "Price is BELOW 200 EMA (Downtrend)"
 
-    # MASTER PROMPT
     prompt = f"""
     Act as a Senior Wall Street Trader.
+    MARKET DATA: Price: ${price:.2f}, RSI: {rsi:.2f}, Trend: {trend}, Context: {ema_status}, ATR: {atr:.2f}
+    SMART STOPS: BUY(Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}) | SELL(Stop=${stop_loss_sell:.2f}, Target=${take_profit_sell:.2f})
+    NEWS: {news_text}
     
-    MARKET DATA:
-    - Price: ${price:.2f}
-    - RSI: {rsi:.2f}
-    - Trend: {trend}
-    - Context: {ema_status}
-    - Volatility (ATR): {atr:.2f}
-    
-    SMART STOPS (Calculated from ATR):
-    - If BUY: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
-    - If SELL: Stop=${stop_loss_sell:.2f}, Target=${take_profit_sell:.2f}
-    
-    NEWS:
-    {news_text}
-    
-    TASK:
-    1. Determine the best trade setup.
-    2. USE THE CALCULATED STOPS above for risk management.
-    3. Explain WHY based on the EMA context and News.
-    
-    OUTPUT FORMAT (Strictly follow this):
-    
+    TASK: Determine best trade setup using calculated stops.
+    OUTPUT FORMAT:
     💎 **TRADE SETUP**
     Action: [BUY / SELL / WAIT]
     Entry: ${price:.2f}
@@ -140,45 +103,76 @@ def analyze_market(price, rsi, trend, atr, ema200, headlines):
     
     📊 **DEEP ANALYSIS**
     Risk Level: [Low/Med/High]
-    Reasoning:
-    - [Technicals: RSI + EMA]
-    - [News Impact]
+    Reasoning: [Technicals + News]
     """
 
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
-        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
-        if resp.status_code == 200:
-            ai_reply = resp.json()['candidates'][0]['content']['parts'][0]['text']
-            return f"🧠 **AI SIGNAL ({model_name.split('/')[-1]}):**\n{ai_reply}"
-        else:
-            return f"⚠️ AI Error: {resp.status_code} - {resp.text}"
-    except Exception as e:
-        return f"⚠️ AI Connection Failed: {e}"
+    # --- KEY ROTATION LOGIC ---
+    for i, current_key in enumerate(API_KEYS):
+        try:
+            print(f"🤖 Attempting AI analysis with Key #{i+1}...")
+            url = get_model_url(current_key)
+            
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            headers = {'Content-Type': 'application/json'}
+            
+            resp = requests.post(url, json=payload, headers=headers)
+            
+            # If Successful (200 OK)
+            if resp.status_code == 200:
+                ai_reply = resp.json()['candidates'][0]['content']['parts'][0]['text']
+                return f"🧠 **AI SIGNAL (Key #{i+1}):**\n{ai_reply}"
+            
+            # If Quota Error (429) or Server Error (5xx)
+            elif resp.status_code in [429, 500, 503]:
+                print(f"⚠️ Key #{i+1} Failed (Status {resp.status_code}). Switching to backup...")
+                continue # Loop tries the next key
+            
+            # If other error (like 400 Bad Request), don't retry, just fail
+            else:
+                return f"⚠️ API Error (Key #{i+1}): {resp.text}"
+
+        except Exception as e:
+            print(f"⚠️ Connection Error on Key #{i+1}: {e}")
+            continue # Try next key
+
+    return "❌ All API Keys failed. Quota exceeded on both accounts."
 
 # --- 7. SEND TELEGRAM ---
 def send_telegram(price, trend, analysis, chart_file):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    if chart_file:
+    
+    # 1. Send Chart
+    if chart_file and os.path.exists(chart_file):
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🛢 **WTI MASTER REPORT (Smart Mode)**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
-    requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
+    # 2. Send Text
+    # We split long messages to avoid Telegram limits
+    msg = f"🛢 **WTI MASTER REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    
+    if len(msg) > 4000:
+        # Split if too long
+        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg[:4000]})
+        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg[4000:]})
+    else:
+        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg})
 
-# --- MAIN LOOP (RUNS FOREVER) ---
+# --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in 24/7 Smart Mode...")
+    if not API_KEYS:
+        print("❌ CRITICAL ERROR: No Gemini API Keys found. Check your environment variables.")
+        exit()
+        
+    print(f"🚀 Bot Started using {len(API_KEYS)} API Keys for Redundancy.")
+    
     while True:
         try:
-            print("Analyzing market...")
-            # Unpack the 6 values (Added atr, ema200)
+            print(f"\n⏰ Time: {time.strftime('%H:%M:%S')} - Analyzing market...")
             data, price, rsi, trend, atr, ema200 = get_market_data()
             
             if data is not None:
                 chart = create_chart(data)
                 headlines = get_news()
-                # Pass the 6 values to analysis
                 analysis = analyze_market(price, rsi, trend, atr, ema200, headlines)
                 send_telegram(price, trend, analysis, chart)
                 print("✅ Report Sent!")
@@ -187,6 +181,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️ Crash prevention: {e}")
         
-        # 10 Minute Sleep (As you requested earlier)
+        # Sleep 10 mins
         print("💤 Sleeping for 10 minutes...")
-        time.sleep(1800)
+        time.sleep(600)
