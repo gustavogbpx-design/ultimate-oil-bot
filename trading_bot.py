@@ -8,33 +8,31 @@ import yfinance as yf
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
-import json
 
 # --- 1. SETUP KEYS (FAILOVER SYSTEM) ---
-# FIXED: Matches your Railway Environment Variables exactly
-GEMINI_KEY_1 = os.environ.get("GEMINI_KEY_1") 
-GEMINI_KEY_2 = os.environ.get("GEMINI_KEY_2") 
+# Matches your Railway Environment Variables exactly
+GEMINI_KEY_1 = os.environ.get("GEMINI_KEY_1")
+GEMINI_KEY_2 = os.environ.get("GEMINI_KEY_2")
 
-# We put them in a list to loop through them
+# Create a list of available keys
 API_KEYS = [key for key in [GEMINI_KEY_1, GEMINI_KEY_2] if key]
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 2. GET DATA ---
+# --- 2. GET DATA (Your Exact Logic) ---
 def get_market_data():
     ticker = "CL=F"
     try:
         data = yf.download(ticker, period="5d", interval="30m", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0
         
-        # Clean Data Format
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
         close = data["Close"]
         if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
         data["Close"] = close
 
-        # Indicators
+        # INDICATORS
         data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
         macd = MACD(close=data["Close"])
         data["MACD"] = macd.macd()
@@ -42,7 +40,6 @@ def get_market_data():
         data["ATR"] = AverageTrueRange(high=data["High"], low=data["Low"], close=data["Close"], window=14).average_true_range()
         data["EMA200"] = EMAIndicator(close=data["Close"], window=200).ema_indicator()
         
-        # Latest Values
         price = data["Close"].iloc[-1]
         rsi = data["RSI"].iloc[-1]
         atr = data["ATR"].iloc[-1]
@@ -59,7 +56,7 @@ def get_market_data():
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
-    mpf.plot(data.tail(50), type='candle', style='charles', mav=(50, 200), savefig=fname)
+    mpf.plot(data.tail(50), type='candle', style='charles', volume=False, mav=(50, 200), savefig=fname)
     return fname
 
 # --- 4. GET NEWS ---
@@ -71,30 +68,55 @@ def get_news():
     except:
         return []
 
-# --- 5. FIND MODEL HELPER ---
-def get_model_url(api_key):
-    # This function constructs the URL for a specific key
-    return f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+# --- 5. FIND MODEL (Updated to accept specific API Key) ---
+def get_valid_model(api_key):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        resp = requests.get(url)
+        data = resp.json()
+        if 'models' in data:
+            for model in data['models']:
+                if 'generateContent' in model.get('supportedGenerationMethods', []):
+                    if "flash" in model['name']:
+                        return model['name']
+            return data['models'][0]['name']
+    except:
+        pass
+    return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (WITH KEY ROTATION) ---
+# --- 6. ANALYZE (FAILOVER LOGIC ADDED HERE) ---
 def analyze_market(price, rsi, trend, atr, ema200, headlines):
     news_text = "\n".join([f"- {h}" for h in headlines])
     
-    # Calculate Stops
     stop_loss_buy = price - (2.0 * atr)
     take_profit_buy = price + (3.0 * atr)
     stop_loss_sell = price + (2.0 * atr) 
     take_profit_sell = price - (3.0 * atr)
+    
     ema_status = "Price is ABOVE 200 EMA (Uptrend)" if price > ema200 else "Price is BELOW 200 EMA (Downtrend)"
 
     prompt = f"""
     Act as a Senior Wall Street Trader.
-    MARKET DATA: Price: ${price:.2f}, RSI: {rsi:.2f}, Trend: {trend}, Context: {ema_status}, ATR: {atr:.2f}
-    SMART STOPS: BUY(Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}) | SELL(Stop=${stop_loss_sell:.2f}, Target=${take_profit_sell:.2f})
-    NEWS: {news_text}
+    MARKET DATA:
+    - Price: ${price:.2f}
+    - RSI: {rsi:.2f}
+    - Trend: {trend}
+    - Context: {ema_status}
+    - Volatility (ATR): {atr:.2f}
     
-    TASK: Determine best trade setup using calculated stops.
-    OUTPUT FORMAT:
+    SMART STOPS (Calculated from ATR):
+    - If BUY: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
+    - If SELL: Stop=${stop_loss_sell:.2f}, Target=${take_profit_sell:.2f}
+    
+    NEWS:
+    {news_text}
+    
+    TASK:
+    1. Determine the best trade setup.
+    2. USE THE CALCULATED STOPS above for risk management.
+    3. Explain WHY based on the EMA context and News.
+    
+    OUTPUT FORMAT (Strictly follow this):
     💎 **TRADE SETUP**
     Action: [BUY / SELL / WAIT]
     Entry: ${price:.2f}
@@ -103,72 +125,70 @@ def analyze_market(price, rsi, trend, atr, ema200, headlines):
     
     📊 **DEEP ANALYSIS**
     Risk Level: [Low/Med/High]
-    Reasoning: [Technicals + News]
+    Reasoning:
+    - [Technicals: RSI + EMA]
+    - [News Impact]
     """
 
-    # --- KEY ROTATION LOGIC ---
+    last_error = "Unknown Error"
+
+    # --- LOOP THROUGH KEYS ---
     for i, current_key in enumerate(API_KEYS):
         try:
-            print(f"🤖 Attempting AI analysis with Key #{i+1}...")
-            url = get_model_url(current_key)
+            print(f"🤖 Key #{i+1}: Checking model...")
+            # dynamically find model using THIS specific key
+            model_name = get_valid_model(current_key)
             
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            headers = {'Content-Type': 'application/json'}
+            print(f"🤖 Key #{i+1}: Sending Request using {model_name}...")
+            url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={current_key}"
             
-            resp = requests.post(url, json=payload, headers=headers)
+            resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
             
-            # If Successful (200 OK)
             if resp.status_code == 200:
                 ai_reply = resp.json()['candidates'][0]['content']['parts'][0]['text']
                 return f"🧠 **AI SIGNAL (Key #{i+1}):**\n{ai_reply}"
-            
-            # If Quota Error (429) or Server Error (5xx)
-            elif resp.status_code in [429, 500, 503]:
-                print(f"⚠️ Key #{i+1} Failed (Status {resp.status_code}). Switching to backup...")
-                continue # Loop tries the next key
-            
-            # If other error (like 400 Bad Request), don't retry, just fail
             else:
-                return f"⚠️ API Error (Key #{i+1}): {resp.text}"
-
+                # Capture the error message from Google
+                error_data = resp.json()
+                error_msg = error_data.get('error', {}).get('message', resp.text)
+                last_error = f"Status {resp.status_code}: {error_msg}"
+                print(f"⚠️ Key #{i+1} Failed: {last_error}")
+                # Loop continues to next key...
+                
         except Exception as e:
-            print(f"⚠️ Connection Error on Key #{i+1}: {e}")
-            continue # Try next key
+            last_error = str(e)
+            print(f"⚠️ Key #{i+1} Crash: {e}")
+            # Loop continues...
 
-    return "❌ All API Keys failed. Quota exceeded on both accounts."
+    # If we exit the loop, ALL keys failed
+    return f"⚠️ **ALL AI KEYS FAILED**\nLast Error: {last_error}"
 
 # --- 7. SEND TELEGRAM ---
 def send_telegram(price, trend, analysis, chart_file):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    
-    # 1. Send Chart
-    if chart_file and os.path.exists(chart_file):
+    if chart_file:
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    # 2. Send Text
-    # We split long messages to avoid Telegram limits
-    msg = f"🛢 **WTI MASTER REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    text = f"🛢 **WTI MASTER REPORT (Smart Mode)**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     
-    if len(msg) > 4000:
-        # Split if too long
-        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg[:4000]})
-        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg[4000:]})
+    # Split message if too long (Telegram limit is 4096 chars)
+    if len(text) > 4000:
+        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text[:4000]})
+        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text[4000:]})
     else:
-        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': msg})
+        requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
     if not API_KEYS:
-        print("❌ CRITICAL ERROR: No Gemini API Keys found. Check your environment variables.")
-        # We don't exit here anymore to prevent the container from crashing loops
-        # It will just print errors until you fix the variables
+        print("❌ CRITICAL ERROR: No Gemini Keys found (GEMINI_KEY_1, GEMINI_KEY_2).")
         
-    print(f"🚀 Bot Started using {len(API_KEYS)} API Keys for Redundancy.")
+    print(f"🚀 Bot Started in 24/7 Smart Mode with {len(API_KEYS)} API Keys...")
     
     while True:
         try:
-            print(f"\n⏰ Time: {time.strftime('%H:%M:%S')} - Analyzing market...")
+            print("Analyzing market...")
             data, price, rsi, trend, atr, ema200 = get_market_data()
             
             if data is not None:
@@ -182,6 +202,5 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️ Crash prevention: {e}")
         
-        # Sleep 10 mins
         print("💤 Sleeping for 10 minutes...")
-        time.sleep(600)
+        time.sleep(1800)
