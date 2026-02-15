@@ -198,4 +198,4 @@ if __name__ == "__main__":
         
         # 10 Minute Sleep
         print("💤 Sleeping for 10 minutes...")
-        time.sleep(600)
+        time.sleep(1800)
