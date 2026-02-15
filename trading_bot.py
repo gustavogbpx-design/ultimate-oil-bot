@@ -14,37 +14,33 @@ GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 2. GET DATA (SPEED MODE: 21 & 50 EMA) ---
+# --- 2. GET DATA (SPEED MODE + S/R LEVELS) ---
 def get_market_data():
     ticker = "CL=F"
     try:
-        # Download 5 Days of 30-min candles
         data = yf.download(ticker, period="5d", interval="30m", progress=False)
-        if data.empty: return None, 0, 0, "No Data", 0, 0, 0
+        if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, 0
         
-        # Clean Data Format
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
         close = data["Close"]
         if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
         data["Close"] = close
 
-        # --- INDICATORS ---
-        # 1. RSI
+        # INDICATORS
         data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
-        
-        # 2. MACD
         macd = MACD(close=data["Close"])
         data["MACD"] = macd.macd()
         data["Signal"] = macd.macd_signal()
-        
-        # 3. ATR (Volatility)
         data["ATR"] = AverageTrueRange(high=data["High"], low=data["Low"], close=data["Close"], window=14).average_true_range()
         
-        # 4. SPEED EMAs (For 1-Hour Trading)
-        data["EMA50"] = EMAIndicator(close=data["Close"], window=50).ema_indicator() # The Trend
-        data["EMA21"] = EMAIndicator(close=data["Close"], window=21).ema_indicator() # The Trigger
+        # SPEED EMAs
+        data["EMA50"] = EMAIndicator(close=data["Close"], window=50).ema_indicator()
+        data["EMA21"] = EMAIndicator(close=data["Close"], window=21).ema_indicator()
         
-        # Get Latest Values
+        # --- NEW: CALCULATE SUPPORT & RESISTANCE (Last 50 Candles) ---
+        recent_high = data["High"].tail(50).max()
+        recent_low = data["Low"].tail(50).min()
+        
         price = data["Close"].iloc[-1]
         rsi = data["RSI"].iloc[-1]
         atr = data["ATR"].iloc[-1]
@@ -53,60 +49,57 @@ def get_market_data():
         
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
         
-        return data, price, rsi, trend, atr, ema50, ema21
+        # Returning 9 values now (Added Support & Resistance)
+        return data, price, rsi, trend, atr, ema50, ema21, recent_high, recent_low
         
     except Exception as e:
         print(f"Data Error: {e}")
-        return None, 0, 0, "Error", 0, 0, 0
+        return None, 0, 0, "Error", 0, 0, 0, 0, 0
 
-# --- 3. DRAW CHART ---
-def create_chart(data):
+# --- 3. DRAW CHART (WITH S/R LINES) ---
+def create_chart(data, high_level, low_level):
     if data is None: return None
     fname = "oil_chart.png"
-    # Show the Fast (21) and Medium (50) EMA
-    mpf.plot(data.tail(50), type='candle', style='charles', volume=False, mav=(21, 50), savefig=fname)
+    
+    # Add Horizontal Lines for Support (Green) and Resistance (Red)
+    # hlines = dict(hlines=[high_level, low_level], colors=['red', 'green'], linewidths=[1, 1], alpha=0.5)
+    
+    # Draw Chart with EMAs
+    mpf.plot(data.tail(50), type='candle', style='charles', volume=False, 
+             mav=(21, 50), 
+             hlines=dict(hlines=[high_level, low_level], colors=['red', 'green'], linestyle='-.'),
+             savefig=fname)
     return fname
 
 # --- 4. GET NEWS ---
 def get_news():
     try:
-        feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+Conflict&hl=en-US&gl=US&ceid=US:en")
+        url = "https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Inventory+OR+Iran&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(url)
         if not feed.entries: return []
-        # Return headlines with timestamps if available
         headlines = []
         for entry in feed.entries[:5]:
             pub_time = entry.get('published', '')
             headlines.append(f"{entry.title} ({pub_time})")
         return headlines
     except:
-        return []
+        return ["⚠️ News Feed Unavailable"]
 
-# --- 5. FIND MODEL (THE WORKING FIX) ---
+# --- 5. FIND MODEL (UNCHANGED ENGINE) ---
 def get_valid_model():
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
-    try:
-        # Dynamically ask Google which models are available
-        resp = requests.get(url)
-        data = resp.json()
-        if 'models' in data:
-            for model in data['models']:
-                if 'generateContent' in model.get('supportedGenerationMethods', []):
-                    # Prefer 1.5-flash if available, but take what works
-                    if "flash" in model['name']:
-                        return model['name']
-            # Fallback to the first available one if Flash isn't found
-            return data['models'][0]['name']
-    except:
-        pass
-    # Absolute backup
+    models = ["models/gemini-1.5-flash", "models/gemini-pro", "models/gemini-1.5-pro-latest"]
+    for m in models:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/{m}?key={GEMINI_KEY}"
+            if requests.get(url).status_code == 200: return m
+        except: continue
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (NEWS FIRST + SPEED LOGIC) ---
-def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
+# --- 6. ANALYZE (NOW SEES SUPPORT/RESISTANCE) ---
+def analyze_market(price, rsi, trend, atr, ema50, ema21, res_level, sup_level, headlines):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
     
-    # --- MATH: Day Trading Stops (1.5x ATR) ---
     stop_loss_buy = price - (1.5 * atr)
     take_profit_buy = price + (2.5 * atr)
     stop_loss_sell = price + (1.5 * atr) 
@@ -114,11 +107,11 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
-    # NEWS-FIRST PROMPT
+    # --- PROMPT WITH VISION ---
     prompt = f"""
-    Act as a Hedge Fund Algo (Day Trading Desk).
+    Act as a Professional Day Trader.
     
-    LATEST NEWS (CRITICAL):
+    LATEST NEWS:
     {news_text}
     
     TECHNICAL DATA (30-min Chart):
@@ -127,21 +120,23 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     - RSI: {rsi:.2f}
     - Volatility (ATR): {atr:.2f}
     
-    TASK:
-    1. ANALYZE NEWS SENTIMENT FIRST. Is the news Bullish (War/Supply Cuts) or Bearish (Inventory Build/Peace)?
-    2. CROSS-REFERENCE with Technicals. 
-       - If News says SELL but Chart says BUY -> ISSUE "WAIT" or "CAUTIOUS BUY".
-       - If News & Chart agree -> ISSUE STRONG SIGNAL.
-    3. Use the calculated limits below.
+    KEY LEVELS (Auto-Detected):
+    - 🔴 Resistance (Ceiling): ${res_level:.2f}
+    - 🟢 Support (Floor): ${sup_level:.2f}
     
-    CALCULATED LIMITS (Day Trade):
+    TASK:
+    1. Check if price is too close to Resistance (Don't Buy) or Support (Don't Sell).
+    2. ANALYZE NEWS SENTIMENT.
+    3. Issue a trade signal based on the Breakout or Rejection of these levels.
+    
+    CALCULATED LIMITS:
     - BUY Setup: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
     - SELL Setup: Stop=${stop_loss_sell:.2f}, Target=${take_profit_sell:.2f}
     
     OUTPUT FORMAT (Strictly follow this):
     
-    📰 **NEWS SENTIMENT**
-    [Bullish/Bearish/Neutral] because... [Explain in 1 sentence]
+    🧱 **KEY LEVELS**
+    Resistance: ${res_level:.2f} | Support: ${sup_level:.2f}
     
     💎 **TRADE DECISION**
     Action: [BUY / SELL / WAIT]
@@ -150,8 +145,8 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Technical Analysis]
-    - [News Impact Analysis]
+    - [News Sentiment]
+    - [Distance to Key Levels]
     """
 
     try:
@@ -172,30 +167,29 @@ def send_telegram(price, trend, analysis, chart_file):
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🏎️ **WTI SPEED REPORT (News First)**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    text = f"🛡️ **WTI VISION REPORT**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
-# --- MAIN LOOP (RUNS FOREVER) ---
+# --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Speed Mode (News First)...")
+    print("🚀 Bot Started (Vision Mode: S/R Lines)...")
     while True:
         try:
             print("Analyzing market...")
-            # Unpack the 7 values (ATR + EMA50 + EMA21)
-            data, price, rsi, trend, atr, ema50, ema21 = get_market_data()
+            # Unpack 9 values now (S/R included)
+            data, price, rsi, trend, atr, ema50, ema21, res, sup = get_market_data()
             
             if data is not None:
-                chart = create_chart(data)
+                # Pass S/R levels to Chart and AI
+                chart = create_chart(data, res, sup)
                 headlines = get_news()
-                # Pass the 7 values to analysis
-                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, headlines)
+                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, res, sup, headlines)
                 send_telegram(price, trend, analysis, chart)
                 print("✅ Report Sent!")
             else:
-                print("❌ No data received.")
+                print("❌ No data.")
         except Exception as e:
-            print(f"⚠️ Crash prevention: {e}")
+            print(f"⚠️ Error: {e}")
         
-        # 10 Minute Sleep
         print("💤 Sleeping for 10 minutes...")
         time.sleep(1800)
