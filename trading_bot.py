@@ -67,16 +67,31 @@ def create_chart(data):
     mpf.plot(data.tail(50), type='candle', style='charles', volume=False, mav=(21, 50), savefig=fname)
     return fname
 
-# --- 4. GET NEWS ---
+# --- 4. GET NEWS (MODIFIED: GLOBAL DRAGNET) ---
 def get_news():
     try:
-        feed = feedparser.parse("https://news.google.com/rss/search?q=Crude+Oil+OR+OPEC+OR+Iran+Conflict&hl=en-US&gl=US&ceid=US:en")
+        # THE "CATCH-ALL" QUERY for Economy, War, Disasters, and Supply
+        query = (
+            "Crude Oil OR Energy Market OR OPEC OR Iran OR Russia OR Ukraine OR "
+            "Federal Reserve OR Inflation OR China Economy OR "
+            "Hurricane OR Earthquake OR Refinery Fire OR Pipeline Burst OR Sanctions"
+        )
+        
+        # Format the URL safely with the massive query
+        base_url = "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en"
+        final_url = base_url.format(requests.utils.quote(query))
+        
+        feed = feedparser.parse(final_url)
         if not feed.entries: return []
-        # Return headlines with timestamps if available
+        
+        # Grab top 10 headlines to ensure we don't miss hidden events
         headlines = []
-        for entry in feed.entries[:5]:
+        for entry in feed.entries[:10]:
             pub_time = entry.get('published', '')
-            headlines.append(f"{entry.title} ({pub_time})")
+            # Clean title to remove extra source tags at the end
+            title = entry.title.split(" - ")[0]
+            headlines.append(f"{title} ({pub_time})")
+            
         return headlines
     except:
         return []
@@ -101,7 +116,7 @@ def get_valid_model():
     # Absolute backup
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (NEWS FIRST + SPEED LOGIC) ---
+# --- 6. ANALYZE (MODIFIED: MACRO-ECONOMIST LOGIC) ---
 def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
@@ -114,11 +129,11 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
-    # NEWS-FIRST PROMPT
+    # MACRO-ECONOMIST PROMPT
     prompt = f"""
-    Act as a Hedge Fund Algo (Day Trading Desk).
+    Act as a Wall Street Strategist & Algo Trader.
     
-    LATEST NEWS (CRITICAL):
+    GLOBAL NEWS FEED (ECONOMY + WAR + SUPPLY):
     {news_text}
     
     TECHNICAL DATA (30-min Chart):
@@ -128,11 +143,15 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     - Volatility (ATR): {atr:.2f}
     
     TASK:
-    1. ANALYZE NEWS SENTIMENT FIRST. Is the news Bullish (War/Supply Cuts) or Bearish (Inventory Build/Peace)?
-    2. CROSS-REFERENCE with Technicals. 
-       - If News says SELL but Chart says BUY -> ISSUE "WAIT" or "CAUTIOUS BUY".
+    1. FILTER NEWS: Ignore noise. Focus on the ONE event moving the market TODAY.
+       - Is it War/Geopolitics? (Bullish)
+       - Is it a Strong Dollar/Fed Rates/Inflation? (Bearish)
+       - Is it China slowing down? (Bearish)
+       - Is it a Hurricane/Refinery outage? (Bullish)
+    2. CORRELATE: Cross-reference the dominant News with the Technical Chart. 
+       - If News is Bearish but Chart says BUY -> ISSUE "WAIT".
        - If News & Chart agree -> ISSUE STRONG SIGNAL.
-    3. Use the calculated limits below.
+    3. Use the calculated limits below for Risk Management.
     
     CALCULATED LIMITS (Day Trade):
     - BUY Setup: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
@@ -140,8 +159,8 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     
     OUTPUT FORMAT (Strictly follow this):
     
-    📰 **NEWS SENTIMENT**
-    [Bullish/Bearish/Neutral] because... [Explain in 1 sentence]
+    🌍 **MARKET DRIVER**
+    [Identify the #1 factor from the news: War, Economy, or Supply? Explain in 1 sentence.]
     
     💎 **TRADE DECISION**
     Action: [BUY / SELL / WAIT]
@@ -150,8 +169,8 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines):
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Technical Analysis]
-    - [News Impact Analysis]
+    - [Macro Analysis: How does the news affect Global Demand/Supply?]
+    - [Technical Confirmation]
     """
 
     try:
@@ -172,12 +191,12 @@ def send_telegram(price, trend, analysis, chart_file):
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    text = f"🏎️ **WTI SPEED REPORT (News First)**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
+    text = f"🏎️ **WTI SPEED REPORT (Macro Mode)**\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN LOOP (RUNS FOREVER) ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Speed Mode (News First)...")
+    print("🚀 Bot Started in Speed Mode (Macro Dragnet)...")
     while True:
         try:
             print("Analyzing market...")
@@ -196,6 +215,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️ Crash prevention: {e}")
         
-        # 10 Minute Sleep
-        print("💤 Sleeping for 10 minutes...")
+        # 30 Minute Sleep
+        print("💤 Sleeping for 30 minutes...")
         time.sleep(1800)
