@@ -108,25 +108,30 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
+   # SNIPER MODE PROMPT
     prompt = f"""
-    Act as a Wall Street Strategist. 
+    Act as a Hedge Fund Algo "Sniper" (Day Trading Desk).
     
     🚨 SYSTEM ALERT TRIGGER: {alert_reason} 🚨
-    (If this says "Regular 30-min Check", do standard analysis. If it says "PRICE SPIKE" or "BREAKING NEWS", focus heavily on explaining the sudden emergency).
     
     GLOBAL NEWS FEED:
     {news_text}
     
-    TECHNICAL DATA:
+    TECHNICAL DATA (30-min Chart):
     - Price: ${price:.2f}
     - EMA Trend: {ema_status}
     - RSI: {rsi:.2f}
     - Volatility (ATR): {atr:.2f}
     
     TASK:
-    1. FILTER NEWS: Identify the #1 market driver right now.
-    2. CORRELATE: Cross-reference the dominant News with the Technical Chart. 
-    3. Use the calculated limits below for Risk Management.
+    You are suffering from "Signal Fatigue" and trading too often. Your new directive is to be RUTHLESSLY picky. You must only take A+ setups.
+    1. CALCULATE CONVICTION: Rate the setup from 0% to 100%.
+       - For a HIGH score (85%+), the News MUST perfectly match the Chart Trend. (e.g., Bullish War News + Bullish EMA cross).
+       - If the market is chopping sideways, RSI is neutral, or News contradicts the chart, Conviction is LOW.
+    2. DECIDE ACTION: 
+       - If Conviction is LESS THAN 85%, your Action MUST be "STRICT WAIT". Do not force a trade.
+       - If Conviction is 85% or higher, output "BUY" or "SELL".
+    3. Use the calculated limits below.
     
     CALCULATED LIMITS:
     - BUY Setup: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
@@ -134,18 +139,19 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     
     OUTPUT FORMAT (Strictly follow this):
     
+    🎯 **CONVICTION SCORE: [0-100]%**
+    
     🌍 **MARKET DRIVER**
     [Identify the #1 factor from the news. Explain in 1 sentence.]
     
     💎 **TRADE DECISION**
-    Action: [BUY / SELL / WAIT]
+    Action: [BUY / SELL / STRICT WAIT]
     Entry: ${price:.2f}
     🛡️ Stop: [ATR Value]
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Macro Analysis]
-    - [Technical Confirmation]
+    - [Explain exactly why the conviction score is high or low. If it is a WAIT, explain what exact condition needs to happen before you will buy/sell.]
     """
 
     try:
