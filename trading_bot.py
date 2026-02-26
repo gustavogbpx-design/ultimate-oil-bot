@@ -129,8 +129,8 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
        - For a HIGH score (85%+), the News MUST perfectly match the Chart Trend. (e.g., Bullish War News + Bullish EMA cross).
        - If the market is chopping sideways, RSI is neutral, or News contradicts the chart, Conviction is LOW.
     2. DECIDE ACTION: 
-       - If Conviction is LESS THAN 85%, your Action MUST be "STRICT WAIT". Do not force a trade.
-       - If Conviction is 85% or higher, output "BUY" or "SELL".
+       - If Conviction is LESS THAN 45%, your Action MUST be "STRICT WAIT". Do not force a trade.
+       - If Conviction is 45% or higher, output "BUY" or "SELL".
     3. Use the calculated limits below.
     
     CALCULATED LIMITS:
