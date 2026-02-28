@@ -10,10 +10,15 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
 
-# --- 1. SETUP KEYS ---
+# --- 1. SETUP KEYS & SETTINGS ---
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# 🛑 SILENT MODE SETTING: 
+# Set to True: Bot ONLY messages you if Conviction is >= 45% or an Emergency hits.
+# Set to False: Bot messages you every 30 minutes, even if it says "STRICT WAIT".
+MUTE_WAIT_SIGNALS = True 
 
 # --- 2. GET DATA (SPEED MODE) ---
 def get_market_data():
@@ -59,9 +64,7 @@ def create_chart(data):
 # --- 4. GET NEWS (STRICT OIL-AFFECTED FILTER) ---
 def get_news():
     try:
-        # THE DOUBLE FILTER:
-        # Part 1: Direct Oil news (Crude Oil, WTI, OPEC)
-        # Part 2: Macro Events (War, Iran, Russia, Earthquakes) MUST also contain "Oil" or "Energy"
+        # DOUBLE FILTER: Macro events MUST explicitly mention Oil or Energy
         query = "(\"Crude Oil\" OR \"WTI\" OR OPEC) OR ((\"War\" OR \"Attack\" OR \"Iran\" OR \"Russia\" OR \"Ukraine\" OR \"Explosion\" OR \"Refinery\" OR \"Sanctions\" OR \"Hurricane\") AND (\"Oil\" OR \"Energy\"))"
         
         base_url = "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en"
@@ -96,10 +99,13 @@ def get_valid_model():
     except: pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (GEMINI BRAIN) ---
+# --- 6. ANALYZE (TACTICAL SNIPER: 45% THRESHOLD + RISK METER) ---
 def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
+    
+    # Injects LIVE time to prevent AI hallucinations of old news
+    current_time_str = time.strftime("%A, %b %d, %Y - %H:%M UTC", time.gmtime())
     
     stop_loss_buy = price - (1.5 * atr)
     take_profit_buy = price + (2.5 * atr)
@@ -108,13 +114,13 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
-   # SNIPER MODE PROMPT
     prompt = f"""
-    Act as a Hedge Fund Algo "Sniper" (Day Trading Desk).
+    Act as a Tactical Hedge Fund Algo (Day Trading Desk). 
     
     🚨 SYSTEM ALERT TRIGGER: {alert_reason} 🚨
+    ⏰ CURRENT SYSTEM TIME: {current_time_str}
     
-    GLOBAL NEWS FEED:
+    GLOBAL NEWS FEED (WITH TIMESTAMPS):
     {news_text}
     
     TECHNICAL DATA (30-min Chart):
@@ -124,14 +130,21 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     - Volatility (ATR): {atr:.2f}
     
     TASK:
-    You are suffering from "Signal Fatigue" and trading too often. Your new directive is to be RUTHLESSLY picky. You must only take A+ setups.
-    1. CALCULATE CONVICTION: Rate the setup from 0% to 100%.
-       - For a HIGH score (85%+), the News MUST perfectly match the Chart Trend. (e.g., Bullish War News + Bullish EMA cross).
-       - If the market is chopping sideways, RSI is neutral, or News contradicts the chart, Conviction is LOW.
-    2. DECIDE ACTION: 
-       - If Conviction is LESS THAN 45%, your Action MUST be "STRICT WAIT". Do not force a trade.
+    You are a Tactical Day Trader. Your directive is to find actionable setups without overtrading.
+    
+    1. TIME-FILTER THE NEWS (CRITICAL): Compare the news timestamps to the CURRENT SYSTEM TIME. 
+       - You MUST prioritize the absolute newest breaking headlines. 
+       - IGNORE outdated historical narratives (e.g., old OPEC cuts, past wars) if they contradict today's live news feed.
+    2. CALCULATE CONVICTION: Rate the setup from 0% to 100%.
+       - For a TRADABLE score (45%+), the freshest breaking news should generally support the Technical Chart Trend, or the technicals must be overwhelmingly strong.
+       - If the market is completely flat, RSI is entirely neutral, or the freshest news violently contradicts the chart, Conviction is LOW.
+    3. ASSESS RISK LEVEL:
+       - 85% to 100% = 🟢 LOW RISK (A+ Setup)
+       - 60% to 84% = 🟡 MEDIUM RISK (Standard Setup)
+       - 45% to 59% = 🔴 HIGH RISK (Aggressive/Early Entry)
+    4. DECIDE ACTION: 
+       - If Conviction is LESS THAN 45%, your Action MUST be "STRICT WAIT". 
        - If Conviction is 45% or higher, output "BUY" or "SELL".
-    3. Use the calculated limits below.
     
     CALCULATED LIMITS:
     - BUY Setup: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
@@ -140,9 +153,10 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     OUTPUT FORMAT (Strictly follow this):
     
     🎯 **CONVICTION SCORE: [0-100]%**
+    ⚠️ **RISK LEVEL: [🟢 LOW RISK / 🟡 MEDIUM RISK / 🔴 HIGH RISK]**
     
     🌍 **MARKET DRIVER**
-    [Identify the #1 factor from the news. Explain in 1 sentence.]
+    [Identify the #1 freshest factor from the news. Explain in 1 sentence.]
     
     💎 **TRADE DECISION**
     Action: [BUY / SELL / STRICT WAIT]
@@ -151,7 +165,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Explain exactly why the conviction score is high or low. If it is a WAIT, explain what exact condition needs to happen before you will buy/sell.]
+    - [Explain the conviction score and risk level. Focus on the TIMING of the news and how it matches the technicals.]
     """
 
     try:
@@ -170,19 +184,18 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    # Add alarm emojis if it's an emergency
-    header = "🚨 **EMERGENCY WTI ALERT** 🚨" if "SPIKE" in alert_reason or "BREAKING" in alert_reason else "🏎️ **WTI SPEED REPORT**"
+    header = "🚨 **EMERGENCY WTI ALERT** 🚨" if "SPIKE" in alert_reason or "BREAKING" in alert_reason else "🏎️ **WTI TACTICAL REPORT**"
     
     text = f"{header}\nTrigger: {alert_reason}\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
-# --- MAIN LOOP (SENTRY MODE) ---
+# --- MAIN LOOP (SENTRY + SILENT TACTICAL MODE) ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Strict Sentry Mode (2-min watch, 30-min Gemini)...")
+    print("🚀 Bot Started in Tactical Mode (45% Threshold, Risk Meter, 2-min Sentry)...")
     
     last_full_report_time = 0 
     last_price = 0
-    seen_news_links = set() # Bot's memory of news it already told you about
+    seen_news_links = set()
 
     while True:
         try:
@@ -198,12 +211,12 @@ if __name__ == "__main__":
             is_emergency = False
             alert_reason = "Regular 30-min Check"
 
-            # --- 1. CHECK FOR PRICE SPIKE (More than $0.50 move) ---
+            # 1. CHECK FOR PRICE SPIKE ($0.50 move)
             if last_price > 0 and abs(price - last_price) >= 0.50:
                 is_emergency = True
                 alert_reason = f"PRICE SPIKE! Moved ${abs(price - last_price):.2f} suddenly!"
 
-            # --- 2. CHECK FOR BREAKING OIL NEWS (< 15 mins old) ---
+            # 2. CHECK FOR BREAKING OIL NEWS (< 15 mins old)
             if not is_emergency: 
                 current_utc = calendar.timegm(time.gmtime())
                 for entry in raw_entries:
@@ -211,27 +224,33 @@ if __name__ == "__main__":
                         entry_time = calendar.timegm(entry.published_parsed)
                         age_in_seconds = current_utc - entry_time
                         
-                        # Trigger if news is < 15 mins (900 seconds) AND hasn't been seen yet
                         if age_in_seconds < 900 and entry.link not in seen_news_links:
                             is_emergency = True
                             alert_reason = f"BREAKING OIL NEWS: {entry.title.split(' - ')[0]}"
                             seen_news_links.add(entry.link)
                             break 
 
-            # --- 3. CHECK IF 30 MINUTES HAVE PASSED ---
+            # 3. CHECK IF 30 MINUTES HAVE PASSED
             time_since_last_report = current_time - last_full_report_time
             is_time_up = time_since_last_report >= 1800 
 
-            # --- TRIGGER GEMINI ---
+            # TRIGGER GEMINI
             if is_emergency or is_time_up:
                 print(f"⚠️ Waking up Gemini! Reason: {alert_reason}")
                 chart = create_chart(data)
                 
                 analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason)
-                send_telegram(price, trend, analysis, chart, alert_reason)
                 
-                print("✅ Report Sent!")
+                # --- SILENT MODE LOGIC ---
+                is_wait_signal = "STRICT WAIT" in analysis.upper()
                 
+                if MUTE_WAIT_SIGNALS and is_wait_signal and not is_emergency:
+                    print("🛑 AI says STRICT WAIT (< 45% Conviction). Muting Telegram to avoid spam.")
+                else:
+                    send_telegram(price, trend, analysis, chart, alert_reason)
+                    print("✅ Report Sent to Telegram!")
+                
+                # Reset timers
                 last_full_report_time = time.time()
                 last_price = price
             else:
