@@ -20,18 +20,23 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Set to False: Bot messages you every 30 minutes, even if it says "STRICT WAIT".
 MUTE_WAIT_SIGNALS = True 
 
-# --- 2. GET DATA (SPEED MODE) ---
+# --- 2. GET DATA (UPGRADED: 15 DAYS / 1-HOUR MODE) ---
 def get_market_data():
     ticker = "CL=F"
     try:
-        data = yf.download(ticker, period="15d", interval="60m", progress=False)
-        if data.empty: return None, 0, 0, "No Data", 0, 0, 0
+        # Changed to 15 days, 1-hour interval for macro trendline accuracy
+        data = yf.download(ticker, period="15d", interval="1h", progress=False)
+        if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, 0
         
-        if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
+        # Clean multi-index columns if yfinance acts up
+        if isinstance(data.columns, pd.MultiIndex): 
+            data.columns = data.columns.droplevel(1)
+            
         close = data["Close"]
         if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
         data["Close"] = close
 
+        # TA Indicators
         data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
         macd = MACD(close=data["Close"])
         data["MACD"] = macd.macd()
@@ -49,24 +54,56 @@ def get_market_data():
         
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
         
-        return data, price, rsi, trend, atr, ema50, ema21
+        # Calculate horizontal Support/Resistance for Gemini's brain
+        plot_data = data.tail(150) # Look at the last ~6 days for immediate S/R
+        recent_high = float(plot_data['High'].max())
+        recent_low = float(plot_data['Low'].min())
+        
+        return data, price, rsi, trend, atr, ema50, ema21, recent_high, recent_low
     except Exception as e:
         print(f"Data Error: {e}")
-        return None, 0, 0, "Error", 0, 0, 0
+        return None, 0, 0, "Error", 0, 0, 0, 0, 0
 
-# --- 3. DRAW CHART ---
+# --- 3. DRAW CHART (UPGRADED: ALGORITHMIC TRENDLINES) ---
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
-    mpf.plot(data.tail(50), type='candle', style='charles', volume=False, mav=(21, 50), savefig=fname)
+    
+    # We plot the last 150 hours to make the lines clearly visible
+    plot_data = data.tail(150)
+    
+    # 1. Math for Horizontal Support & Resistance (Yellow & Blue lines)
+    recent_high = plot_data['High'].max()
+    recent_low = plot_data['Low'].min()
+    horizontal_lines = [recent_high, recent_low]
+    
+    # 2. Math for Trendlines (Linear Geometry)
+    # Split the timeline in half to find structural lower-lows and higher-highs
+    mid = len(plot_data) // 2
+    
+    p1_min = plot_data['Low'].iloc[:mid].idxmin()
+    p2_min = plot_data['Low'].iloc[mid:].idxmin()
+    
+    p1_max = plot_data['High'].iloc[:mid].idxmax()
+    p2_max = plot_data['High'].iloc[mid:].idxmax()
+    
+    # Create coordinate pairs for mplfinance (Date, Price)
+    angled_lines = [
+        [(p1_min, plot_data['Low'].loc[p1_min]), (p2_min, plot_data['Low'].loc[p2_min])], # Support Channel
+        [(p1_max, plot_data['High'].loc[p1_max]), (p2_max, plot_data['High'].loc[p2_max])]  # Resistance Channel
+    ]
+    
+    # Draw the chart with moving averages, horizontal S/R, and angled trendlines
+    mpf.plot(plot_data, type='candle', style='charles', volume=False, mav=(21, 50), 
+             hlines=dict(hlines=horizontal_lines, colors=['b', 'y'], linestyle='--'),
+             alines=dict(alines=angled_lines, colors=['w', 'w'], linewidths=1.5),
+             savefig=fname)
     return fname
 
 # --- 4. GET NEWS (STRICT OIL-AFFECTED FILTER) ---
 def get_news():
     try:
-        # DOUBLE FILTER: Macro events MUST explicitly mention Oil or Energy
         query = "(\"Crude Oil\" OR \"WTI\" OR OPEC) OR ((\"War\" OR \"Attack\" OR \"Iran\" OR \"Russia\" OR \"Ukraine\" OR \"Explosion\" OR \"Refinery\" OR \"Sanctions\" OR \"Hurricane\") AND (\"Oil\" OR \"Energy\"))"
-        
         base_url = "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en"
         final_url = base_url.format(requests.utils.quote(query))
         
@@ -99,12 +136,11 @@ def get_valid_model():
     except: pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (TACTICAL SNIPER: 45% THRESHOLD + RISK METER) ---
-def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason):
+# --- 6. ANALYZE (UPGRADED: 1H CHART + S/R AWARENESS) ---
+def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_high, recent_low, headlines, alert_reason):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
     
-    # Injects LIVE time to prevent AI hallucinations of old news
     current_time_str = time.strftime("%A, %b %d, %Y - %H:%M UTC", time.gmtime())
     
     stop_loss_buy = price - (1.5 * atr)
@@ -123,8 +159,10 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     GLOBAL NEWS FEED (WITH TIMESTAMPS):
     {news_text}
     
-    TECHNICAL DATA (30-min Chart):
+    TECHNICAL DATA (1-Hour Chart):
     - Price: ${price:.2f}
+    - Major Resistance Ceiling: ${recent_high:.2f}
+    - Major Support Floor: ${recent_low:.2f}
     - EMA Trend: {ema_status}
     - RSI: {rsi:.2f}
     - Volatility (ATR): {atr:.2f}
@@ -165,7 +203,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Explain the conviction score and risk level. Focus on the TIMING of the news and how it matches the technicals.]
+    - [Explain the conviction score and risk level. Focus on the TIMING of the news and how it matches the 1-Hour technicals, specifically mentioning if it is approaching the ${recent_high:.2f} Resistance or ${recent_low:.2f} Support.]
     """
 
     try:
@@ -189,9 +227,9 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
     text = f"{header}\nTrigger: {alert_reason}\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
-# --- MAIN LOOP (SENTRY + SILENT TACTICAL MODE) ---
+# --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Tactical Mode (45% Threshold, Risk Meter, 2-min Sentry)...")
+    print("🚀 Bot Started in Quant Mode (Algorithmic Trendlines, 1H Data, 45% Threshold)...")
     
     last_full_report_time = 0 
     last_price = 0
@@ -200,7 +238,7 @@ if __name__ == "__main__":
     while True:
         try:
             print("Sentry checking market quietly...")
-            data, price, rsi, trend, atr, ema50, ema21 = get_market_data()
+            data, price, rsi, trend, atr, ema50, ema21, recent_high, recent_low = get_market_data()
             headlines, raw_entries = get_news()
             
             if data is None:
@@ -239,7 +277,7 @@ if __name__ == "__main__":
                 print(f"⚠️ Waking up Gemini! Reason: {alert_reason}")
                 chart = create_chart(data)
                 
-                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, headlines, alert_reason)
+                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_high, recent_low, headlines, alert_reason)
                 
                 # --- SILENT MODE LOGIC ---
                 is_wait_signal = "STRICT WAIT" in analysis.upper()
