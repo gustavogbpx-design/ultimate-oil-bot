@@ -27,8 +27,7 @@ def calculate_universal_channel(slice_data, cutoff_pct=0.92):
     x = np.arange(len(slice_data))
     y = slice_data['Close'].values
     
-    # 1. Find the universal Line of Best Fit (Works for Up, Down, or Flat trends)
-    # m = slope (direction), b = intercept (starting height)
+    # 1. Find the universal Line of Best Fit
     m, b = np.polyfit(x, y, 1)
     
     # Create the center mathematical line
@@ -38,19 +37,18 @@ def calculate_universal_channel(slice_data, cutoff_pct=0.92):
     high_offsets = slice_data['High'].values - reg_line
     low_offsets = reg_line - slice_data['Low'].values
     
-    # 3. Apply the Percentile Filter to BOTH sides (Ignores flash crashes and breakout spikes)
+    # 3. Apply the Percentile Filter to BOTH sides
     sorted_highs = np.sort(high_offsets)
     sorted_lows = np.sort(low_offsets)
     
     if len(sorted_highs) > 0 and len(sorted_lows) > 0:
-        # Prevent index out of bounds
         cutoff_idx = int(len(sorted_highs) * cutoff_pct)
         cutoff_idx = min(cutoff_idx, len(sorted_highs) - 1)
         
         upper_offset = sorted_highs[cutoff_idx]
         lower_offset = sorted_lows[cutoff_idx]
     else:
-        upper_offset, lower_offset = 1.0, 1.0
+        upper_offset, lower_offset = 5.0, 5.0 # Scaled slightly for Gold
         
     # 4. Create the final parallel channel boundaries
     upper_channel = reg_line + upper_offset
@@ -67,7 +65,7 @@ def calculate_universal_channel(slice_data, cutoff_pct=0.92):
 
 # --- 2. GET DATA (25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
-    ticker = "CL=F"
+    ticker = "GC=F" # UPDATED TO GOLD FUTURES
     try:
         data = yf.download(ticker, period="25d", interval="1h", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, None
@@ -105,12 +103,11 @@ def get_market_data():
 # --- 3. DRAW CHART (UNIVERSAL DUAL-CHANNEL MODE) ---
 def create_chart(plot_data):
     if plot_data is None: return None
-    fname = "oil_chart.png"
+    fname = "gold_chart.png" # UPDATED FILENAME
     
     recent_low = plot_data['Low'].min()
     horizontal_lines = [recent_low] 
     
-    # --- CALCULATE UNIVERSAL CHANNELS ---
     # 1. Macro Channel: Full 25-day trend, filtering out top/bottom 8% of wicks
     macro_exists, macro_sup, macro_res = calculate_universal_channel(plot_data, cutoff_pct=0.92)
     
@@ -144,10 +141,11 @@ def create_chart(plot_data):
     mpf.plot(plot_data, **kwargs)
     return fname
 
-# --- 4. GET NEWS ---
+# --- 4. GET NEWS (UPDATED FOR GOLD & MACROECONOMICS) ---
 def get_news():
     try:
-        query = "(\"Crude Oil\" OR \"WTI\" OR OPEC) OR ((\"War\" OR \"Attack\" OR \"Iran\" OR \"Russia\" OR \"Ukraine\" OR \"Explosion\" OR \"Refinery\" OR \"Sanctions\" OR \"Hurricane\") AND (\"Oil\" OR \"Energy\"))"
+        # Changed the brain to hunt for Gold drivers
+        query = "(\"Gold\" OR \"XAUUSD\" OR \"Precious Metals\") OR ((\"Inflation\" OR \"Fed\" OR \"Interest Rates\" OR \"Jerome Powell\" OR \"CPI\") AND (\"Gold\" OR \"Markets\"))"
         base_url = "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en"
         final_url = base_url.format(requests.utils.quote(query))
         
@@ -201,7 +199,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     GLOBAL NEWS FEED (WITH TIMESTAMPS):
     {news_text}
     
-    TECHNICAL DATA (1-Hour Chart):
+    TECHNICAL DATA (1-Hour Chart - GOLD/XAU):
     - Price: ${price:.2f}
     - Absolute Hard Floor Support: ${recent_low:.2f}
     - Market Structure: UNIVERSAL DUAL-CHANNEL TRACKING ACTIVE (Macro & Micro trends being mapped via Linear Regression)
@@ -210,9 +208,9 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     - Volatility (ATR): {atr:.2f}
     
     TASK:
-    You are a Tactical Day Trader. Your directive is to find actionable setups without overtrading.
+    You are a Tactical Gold Trader. Your directive is to find actionable setups without overtrading.
     
-    1. TIME-FILTER THE NEWS (CRITICAL): Compare the news timestamps to the CURRENT SYSTEM TIME. 
+    1. TIME-FILTER THE NEWS (CRITICAL): Compare the news timestamps to the CURRENT SYSTEM TIME. Look for macro catalysts (Fed, CPI, Dollar strength).
     2. CALCULATE CONVICTION: Rate the setup from 0% to 100%. 
     3. ASSESS RISK LEVEL: [🟢 LOW / 🟡 MEDIUM / 🔴 HIGH]
     4. DECIDE ACTION: [BUY / SELL / STRICT WAIT]
@@ -254,13 +252,14 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
         with open(chart_file, 'rb') as f:
             requests.post(f"{base_url}/sendPhoto", data={'chat_id': TELEGRAM_CHAT_ID}, files={'photo': f})
     
-    header = "🚨 **EMERGENCY WTI ALERT** 🚨" if "SPIKE" in alert_reason or "BREAKING" in alert_reason else "🏎️ **WTI TACTICAL REPORT**"
+    # UPDATED HEADERS FOR GOLD
+    header = "🚨 **EMERGENCY GOLD ALERT** 🚨" if "SPIKE" in alert_reason or "BREAKING" in alert_reason else "🏆 **GOLD TACTICAL REPORT**"
     text = f"{header}\nTrigger: {alert_reason}\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Universal Linear Regression Engine)...")
+    print("🚀 Gold Quant Bot Started (Universal Linear Regression Engine)...")
     
     last_full_report_time = 0 
     last_price = 0
@@ -268,7 +267,7 @@ if __name__ == "__main__":
 
     while True:
         try:
-            print("Sentry checking market quietly...")
+            print("Sentry checking Gold market quietly...")
             data, price, rsi, trend, atr, ema50, ema21, recent_low, plot_data = get_market_data()
             headlines, raw_entries = get_news()
             
@@ -280,9 +279,10 @@ if __name__ == "__main__":
             is_emergency = False
             alert_reason = "Regular 30-min Check"
 
-            if last_price > 0 and abs(price - last_price) >= 0.50:
+            # UPDATED SPIKE THRESHOLD: $5.00 move for Gold instead of $0.50
+            if last_price > 0 and abs(price - last_price) >= 5.00:
                 is_emergency = True
-                alert_reason = f"PRICE SPIKE! Moved ${abs(price - last_price):.2f} suddenly!"
+                alert_reason = f"PRICE SPIKE! Gold moved ${abs(price - last_price):.2f} suddenly!"
 
             if not is_emergency: 
                 current_utc = calendar.timegm(time.gmtime())
@@ -293,7 +293,7 @@ if __name__ == "__main__":
                         
                         if age_in_seconds < 900 and entry.link not in seen_news_links:
                             is_emergency = True
-                            alert_reason = f"BREAKING OIL NEWS: {entry.title.split(' - ')[0]}"
+                            alert_reason = f"BREAKING GOLD NEWS: {entry.title.split(' - ')[0]}"
                             seen_news_links.add(entry.link)
                             break 
 
@@ -312,12 +312,12 @@ if __name__ == "__main__":
                     print("🛑 AI says STRICT WAIT (< 45% Conviction). Muting Telegram to avoid spam.")
                 else:
                     send_telegram(price, trend, analysis, chart, alert_reason)
-                    print("✅ Report Sent to Telegram!")
+                    print("✅ Gold Report Sent to Telegram!")
                 
                 last_full_report_time = time.time()
                 last_price = price
             else:
-                print("Market is quiet. Sleeping for 2 minutes...")
+                print("Gold Market is quiet. Sleeping for 2 minutes...")
                 
         except Exception as e:
             print(f"⚠️ Crash prevention: {e}")
