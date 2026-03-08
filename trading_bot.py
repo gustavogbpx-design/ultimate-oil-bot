@@ -24,7 +24,7 @@ MUTE_WAIT_SIGNALS = True
 def get_market_data():
     ticker = "CL=F"
     try:
-        data = yf.download(ticker, period="5d", interval="30m", progress=False)
+        data = yf.download(ticker, period="15d", interval="60m", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0, 0
         
         if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
