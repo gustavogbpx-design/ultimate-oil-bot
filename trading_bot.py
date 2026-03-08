@@ -5,7 +5,7 @@ import yfinance as yf
 import requests
 import feedparser
 import pandas as pd
-import numpy as np  # Required for the algorithmic channel math
+import numpy as np
 import mplfinance as mpf
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
@@ -21,15 +21,14 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Set to False: Bot messages you every 30 minutes, even if it says "STRICT WAIT".
 MUTE_WAIT_SIGNALS = True 
 
-# --- 2. GET DATA (15 DAYS / 1-HOUR MODE) ---
+# --- 2. GET DATA (UPGRADED: 25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
     ticker = "CL=F"
     try:
-        # Pulling 15 days of 1-hour candles for accurate macro trends
-        data = yf.download(ticker, period="15d", interval="1h", progress=False)
+        # Upgraded to 25 days to catch the absolute lowest swing pivots
+        data = yf.download(ticker, period="25d", interval="1h", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, 0
         
-        # Clean multi-index columns if yfinance acts up
         if isinstance(data.columns, pd.MultiIndex): 
             data.columns = data.columns.droplevel(1)
             
@@ -55,8 +54,8 @@ def get_market_data():
         
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
         
-        # Calculate horizontal Support/Resistance for Gemini's brain
-        plot_data = data.tail(150) # Look at the last ~6 days for immediate S/R
+        # Increase lookback to 250 candles to utilize the 25-day data
+        plot_data = data.tail(250) 
         recent_high = float(plot_data['High'].max())
         recent_low = float(plot_data['Low'].min())
         
@@ -65,51 +64,62 @@ def get_market_data():
         print(f"Data Error: {e}")
         return None, 0, 0, "Error", 0, 0, 0, 0, 0
 
-# --- 3. DRAW CHART (DARK MODE + VISIBLE CHANNELS) ---
+# --- 3. DRAW CHART (IQ OPTION COLORS + HUMAN CHANNELS) ---
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
     
-    # We plot the last 150 hours to make the lines clearly visible
-    plot_data = data.tail(150)
+    # Plot the last 250 hours to see the massive 25-day swings
+    plot_data = data.tail(250)
     
     # 1. Math for Horizontal Support & Resistance
     recent_high = plot_data['High'].max()
     recent_low = plot_data['Low'].min()
     horizontal_lines = [recent_high, recent_low]
     
-    # 2. Math for Trendlines (Linear Regression Channel)
+    # 2. Math for Trendlines (Human-Style Pivot Connection)
+    half = len(plot_data) // 2
+    
+    # Find the absolute lowest wicks in both halves
+    idx1 = plot_data['Low'].iloc[:half].idxmin()
+    val1 = plot_data['Low'].loc[idx1]
+    
+    idx2 = plot_data['Low'].iloc[half:].idxmin()
+    val2 = plot_data['Low'].loc[idx2]
+    
+    pos1 = plot_data.index.get_loc(idx1)
+    pos2 = plot_data.index.get_loc(idx2)
+    
+    # Calculate trajectory slope
+    m = (val2 - val1) / (pos2 - pos1) if pos2 != pos1 else 0 
+    
     x = np.arange(len(plot_data))
-    y = plot_data['Close'].values
     
-    # Calculate the slope (m) and intercept (b) of the main trend
-    m, b = np.polyfit(x, y, 1)
+    # Build the channel
+    support_line = m * (x - pos1) + val1
+    max_offset = (plot_data['High'].values - support_line).max()
+    resistance_line = support_line + max_offset
     
-    # Create the central regression line
-    reg_line = m * x + b
+    # The Median Line (Middle of the channel)
+    median_line = support_line + (max_offset / 2)
     
-    # Find the maximum distance from the center line to the highs and lows
-    upper_offset = (plot_data['High'].values - reg_line).max()
-    lower_offset = (reg_line - plot_data['Low'].values).max()
-    
-    # Create the top and bottom channel lines
-    upper_channel = reg_line + upper_offset
-    lower_channel = reg_line - lower_offset
-    
-    # Grab the start and end dates for the exact coordinates
     date_start = plot_data.index[0]
     date_end = plot_data.index[-1]
     
-    # Create coordinate pairs for mplfinance: [(Date1, Price1), (Date2, Price2)]
     angled_lines = [
-        [(date_start, lower_channel[0]), (date_end, lower_channel[-1])], # Support Floor
-        [(date_start, upper_channel[0]), (date_end, upper_channel[-1])]  # Resistance Ceiling
+        [(date_start, support_line[0]), (date_end, support_line[-1])],    # Bottom
+        [(date_start, resistance_line[0]), (date_end, resistance_line[-1])], # Top
+        [(date_start, median_line[0]), (date_end, median_line[-1])]       # Middle
     ]
     
-    # Draw the chart using DARK MODE ('nightclouds') and thicker white lines
-    mpf.plot(plot_data, type='candle', style='nightclouds', volume=False, mav=(21, 50), 
+    # --- CUSTOM IQ OPTION COLOR PROFILE ---
+    # Up: Neon Cyan (#00E676), Down: Neon Purple (#D500F9)
+    mc = mpf.make_marketcolors(up='#00E676', down='#D500F9', edge='inherit', wick='inherit', volume='in')
+    iq_style = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc)
+    
+    mpf.plot(plot_data, type='candle', style=iq_style, volume=False, mav=(21, 50), 
              hlines=dict(hlines=horizontal_lines, colors=['#00aaff', '#ffcc00'], linestyle='--'),
-             alines=dict(alines=angled_lines, colors=['white', 'white'], linewidths=2.0),
+             alines=dict(alines=angled_lines, colors=['white', 'white', 'gray'], linewidths=2.0),
              savefig=fname)
     return fname
 
@@ -242,7 +252,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Dark Chart, Algo Trendlines, 1H Data)...")
+    print("🚀 Bot Started in Quant Mode (25-Day Data, IQ Option Colors, Pivot Channels)...")
     
     last_full_report_time = 0 
     last_price = 0
@@ -262,12 +272,10 @@ if __name__ == "__main__":
             is_emergency = False
             alert_reason = "Regular 30-min Check"
 
-            # 1. CHECK FOR PRICE SPIKE ($0.50 move)
             if last_price > 0 and abs(price - last_price) >= 0.50:
                 is_emergency = True
                 alert_reason = f"PRICE SPIKE! Moved ${abs(price - last_price):.2f} suddenly!"
 
-            # 2. CHECK FOR BREAKING OIL NEWS (< 15 mins old)
             if not is_emergency: 
                 current_utc = calendar.timegm(time.gmtime())
                 for entry in raw_entries:
@@ -281,18 +289,15 @@ if __name__ == "__main__":
                             seen_news_links.add(entry.link)
                             break 
 
-            # 3. CHECK IF 30 MINUTES HAVE PASSED
             time_since_last_report = current_time - last_full_report_time
             is_time_up = time_since_last_report >= 1800 
 
-            # TRIGGER GEMINI
             if is_emergency or is_time_up:
                 print(f"⚠️ Waking up Gemini! Reason: {alert_reason}")
                 chart = create_chart(data)
                 
                 analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_high, recent_low, headlines, alert_reason)
                 
-                # --- SILENT MODE LOGIC ---
                 is_wait_signal = "STRICT WAIT" in analysis.upper()
                 
                 if MUTE_WAIT_SIGNALS and is_wait_signal and not is_emergency:
@@ -301,7 +306,6 @@ if __name__ == "__main__":
                     send_telegram(price, trend, analysis, chart, alert_reason)
                     print("✅ Report Sent to Telegram!")
                 
-                # Reset timers
                 last_full_report_time = time.time()
                 last_price = price
             else:
