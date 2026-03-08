@@ -21,11 +21,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Set to False: Bot messages you every 30 minutes, even if it says "STRICT WAIT".
 MUTE_WAIT_SIGNALS = True 
 
-# --- 2. GET DATA (UPGRADED: 25 DAYS / 1-HOUR MODE) ---
+# --- 2. GET DATA (25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
     ticker = "CL=F"
     try:
-        # Upgraded to 25 days to catch the absolute lowest swing pivots
         data = yf.download(ticker, period="25d", interval="1h", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, 0
         
@@ -54,7 +53,6 @@ def get_market_data():
         
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
         
-        # Increase lookback to 250 candles to utilize the 25-day data
         plot_data = data.tail(250) 
         recent_high = float(plot_data['High'].max())
         recent_low = float(plot_data['Low'].min())
@@ -64,23 +62,20 @@ def get_market_data():
         print(f"Data Error: {e}")
         return None, 0, 0, "Error", 0, 0, 0, 0, 0
 
-# --- 3. DRAW CHART (IQ OPTION COLORS + HUMAN CHANNELS) ---
+# --- 3. DRAW CHART (TRIMMED CHANNEL ENGINE) ---
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
     
-    # Plot the last 250 hours to see the massive 25-day swings
     plot_data = data.tail(250)
     
-    # 1. Math for Horizontal Support & Resistance
-    recent_high = plot_data['High'].max()
+    # 1. Math for Horizontal Support (Floor Only)
     recent_low = plot_data['Low'].min()
-    horizontal_lines = [recent_high, recent_low]
+    horizontal_lines = [recent_low] # Removed the top line to keep it clean
     
-    # 2. Math for Trendlines (Human-Style Pivot Connection)
+    # 2. Math for Trendlines (Trimmed to actual trend)
     half = len(plot_data) // 2
     
-    # Find the absolute lowest wicks in both halves
     idx1 = plot_data['Low'].iloc[:half].idxmin()
     val1 = plot_data['Low'].loc[idx1]
     
@@ -89,36 +84,48 @@ def create_chart(data):
     
     pos1 = plot_data.index.get_loc(idx1)
     pos2 = plot_data.index.get_loc(idx2)
+    pos_end = len(plot_data) - 1
     
     # Calculate trajectory slope
     m = (val2 - val1) / (pos2 - pos1) if pos2 != pos1 else 0 
     
-    x = np.arange(len(plot_data))
+    # We only look at the data AFTER the trend started (pos1) to find the ceiling
+    trend_highs = plot_data['High'].iloc[pos1:].values
+    x_trend = np.arange(len(trend_highs)) 
+    support_trend = m * x_trend + val1
     
-    # Build the channel
-    support_line = m * (x - pos1) + val1
-    max_offset = (plot_data['High'].values - support_line).max()
-    resistance_line = support_line + max_offset
+    max_offset = (trend_highs - support_trend).max()
     
-    # The Median Line (Middle of the channel)
-    median_line = support_line + (max_offset / 2)
-    
-    date_start = plot_data.index[0]
+    # Exact start date (the pivot) and end date (today)
+    date_start_trend = plot_data.index[pos1]
     date_end = plot_data.index[-1]
     
+    # Calculate Prices for exactly where the lines start and end
+    # Support (Bottom)
+    support_start_val = val1
+    support_end_val = m * (pos_end - pos1) + val1
+    
+    # Resistance (Top)
+    res_start_val = support_start_val + max_offset
+    res_end_val = support_end_val + max_offset
+    
+    # Median (Middle)
+    med_start_val = support_start_val + (max_offset / 2)
+    med_end_val = support_end_val + (max_offset / 2)
+    
+    # Create the trimmed coordinate pairs
     angled_lines = [
-        [(date_start, support_line[0]), (date_end, support_line[-1])],    # Bottom
-        [(date_start, resistance_line[0]), (date_end, resistance_line[-1])], # Top
-        [(date_start, median_line[0]), (date_end, median_line[-1])]       # Middle
+        [(date_start_trend, support_start_val), (date_end, support_end_val)],    # Bottom Line
+        [(date_start_trend, res_start_val), (date_end, res_end_val)],          # Top Line
+        [(date_start_trend, med_start_val), (date_end, med_end_val)]           # Middle Line
     ]
     
     # --- CUSTOM IQ OPTION COLOR PROFILE ---
-    # Up: Neon Cyan (#00E676), Down: Neon Purple (#D500F9)
     mc = mpf.make_marketcolors(up='#00E676', down='#D500F9', edge='inherit', wick='inherit', volume='in')
     iq_style = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc)
     
     mpf.plot(plot_data, type='candle', style=iq_style, volume=False, mav=(21, 50), 
-             hlines=dict(hlines=horizontal_lines, colors=['#00aaff', '#ffcc00'], linestyle='--'),
+             hlines=dict(hlines=horizontal_lines, colors=['#ffcc00'], linestyle='--'),
              alines=dict(alines=angled_lines, colors=['white', 'white', 'gray'], linewidths=2.0),
              savefig=fname)
     return fname
@@ -252,7 +259,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (25-Day Data, IQ Option Colors, Pivot Channels)...")
+    print("🚀 Bot Started in Quant Mode (Trimmed Channel Engine)...")
     
     last_full_report_time = 0 
     last_price = 0
