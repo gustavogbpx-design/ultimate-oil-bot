@@ -18,55 +18,50 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MUTE_WAIT_SIGNALS = True 
 
-# --- UPGRADED MATH ENGINE: REUSABLE CHANNEL CALCULATOR ---
-def calculate_channel(slice_data):
-    """Calculates a channel for ANY given slice of data."""
+# --- UPGRADED MATH ENGINE: UNIVERSAL LINEAR REGRESSION CHANNEL ---
+def calculate_universal_channel(slice_data, cutoff_pct=0.92):
+    """Dynamically calculates an upward or downward channel for ANY data slice."""
     if len(slice_data) < 20:
         return False, [], []
         
-    half = len(slice_data) // 2
+    x = np.arange(len(slice_data))
+    y = slice_data['Close'].values
     
-    # 1. Find Pivot Lows
-    idx1 = slice_data['Low'].iloc[:half].idxmin()
-    val1 = slice_data['Low'].loc[idx1]
-    pos1 = slice_data.index.get_loc(idx1)
+    # 1. Find the universal Line of Best Fit (Works for Up, Down, or Flat trends)
+    # m = slope (direction), b = intercept (starting height)
+    m, b = np.polyfit(x, y, 1)
     
-    idx2 = slice_data['Low'].iloc[half:].idxmin()
-    val2 = slice_data['Low'].loc[idx2]
-    pos2 = slice_data.index.get_loc(idx2)
+    # Create the center mathematical line
+    reg_line = m * x + b
     
-    if pos2 <= pos1 or abs(val2 - val1) < 0.20:
-        return False, [], []
+    # 2. Calculate offsets for all Highs and Lows from the center line
+    high_offsets = slice_data['High'].values - reg_line
+    low_offsets = reg_line - slice_data['Low'].values
+    
+    # 3. Apply the Percentile Filter to BOTH sides (Ignores flash crashes and breakout spikes)
+    sorted_highs = np.sort(high_offsets)
+    sorted_lows = np.sort(low_offsets)
+    
+    if len(sorted_highs) > 0 and len(sorted_lows) > 0:
+        # Prevent index out of bounds
+        cutoff_idx = int(len(sorted_highs) * cutoff_pct)
+        cutoff_idx = min(cutoff_idx, len(sorted_highs) - 1)
         
-    m = (val2 - val1) / (pos2 - pos1)
-    
-    # 2. Find Structural Ceiling (92nd Percentile Outlier Filter)
-    trend_highs = slice_data['High'].iloc[pos1:].values
-    x_trend = np.arange(pos1, len(slice_data))
-    support_trend = m * (x_trend - pos1) + val1
-    
-    all_offsets = trend_highs - support_trend
-    sorted_offsets = np.sort(all_offsets)
-    
-    if len(sorted_offsets) > 0:
-        cutoff_index = int(len(sorted_offsets) * 0.92)
-        true_offset = sorted_offsets[cutoff_index]
+        upper_offset = sorted_highs[cutoff_idx]
+        lower_offset = sorted_lows[cutoff_idx]
     else:
-        true_offset = 1.0
+        upper_offset, lower_offset = 1.0, 1.0
         
-    pos_end = len(slice_data) - 1
+    # 4. Create the final parallel channel boundaries
+    upper_channel = reg_line + upper_offset
+    lower_channel = reg_line - lower_offset
     
-    date_start = slice_data.index[pos1]
-    date_end = slice_data.index[pos_end]
-    
-    support_start = val1
-    support_end = m * (pos_end - pos1) + val1
-    res_start = support_start + true_offset
-    res_end = support_end + true_offset
+    date_start = slice_data.index[0]
+    date_end = slice_data.index[-1]
     
     # Return coordinate pairs for mplfinance
-    support_line = [(date_start, support_start), (date_end, support_end)]
-    resistance_line = [(date_start, res_start), (date_end, res_end)]
+    support_line = [(date_start, lower_channel[0]), (date_end, lower_channel[-1])]
+    resistance_line = [(date_start, upper_channel[0]), (date_end, upper_channel[-1])]
     
     return True, support_line, resistance_line
 
@@ -107,7 +102,7 @@ def get_market_data():
         print(f"Data Error: {e}")
         return None, 0, 0, "Error", 0, 0, 0, 0, None
 
-# --- 3. DRAW CHART (DUAL-CHANNEL MODE) ---
+# --- 3. DRAW CHART (UNIVERSAL DUAL-CHANNEL MODE) ---
 def create_chart(plot_data):
     if plot_data is None: return None
     fname = "oil_chart.png"
@@ -115,12 +110,12 @@ def create_chart(plot_data):
     recent_low = plot_data['Low'].min()
     horizontal_lines = [recent_low] 
     
-    # --- CALCULATE TWO SEPARATE CHANNELS ---
-    # 1. Macro Channel (Full 250 hours)
-    macro_exists, macro_sup, macro_res = calculate_channel(plot_data)
+    # --- CALCULATE UNIVERSAL CHANNELS ---
+    # 1. Macro Channel: Full 25-day trend, filtering out top/bottom 8% of wicks
+    macro_exists, macro_sup, macro_res = calculate_universal_channel(plot_data, cutoff_pct=0.92)
     
-    # 2. Micro Channel (Last 70 hours / ~3 days of aggressive trend)
-    micro_exists, micro_sup, micro_res = calculate_channel(plot_data.tail(70))
+    # 2. Micro Channel: Last 70 hours, filtering top/bottom 20% to hug the candles tightly
+    micro_exists, micro_sup, micro_res = calculate_universal_channel(plot_data.tail(70), cutoff_pct=0.80)
 
     mc = mpf.make_marketcolors(up='#00E676', down='#D500F9', edge='inherit', wick='inherit', volume='in')
     iq_style = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc)
@@ -136,12 +131,12 @@ def create_chart(plot_data):
     if macro_exists:
         lines_to_draw.extend([macro_sup, macro_res])
         line_colors.extend(['white', 'gray'])
-        line_styles.extend(['-', '-']) # Solid lines for macro
+        line_styles.extend(['-', '-']) 
         
     if micro_exists:
         lines_to_draw.extend([micro_sup, micro_res])
-        line_colors.extend(['#00aaff', '#00aaff']) # Neon Blue for micro
-        line_styles.extend(['--', '--']) # Dashed lines for micro
+        line_colors.extend(['#00aaff', '#00aaff']) 
+        line_styles.extend(['--', '--']) 
 
     if lines_to_draw:
         kwargs['alines'] = dict(alines=lines_to_draw, colors=line_colors, linestyle=line_styles, linewidths=2.0)
@@ -185,7 +180,7 @@ def get_valid_model():
     except: pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (DUAL CHANNEL AWARENESS) ---
+# --- 6. ANALYZE (UNIVERSAL CHANNEL AWARENESS) ---
 def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
@@ -209,7 +204,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     TECHNICAL DATA (1-Hour Chart):
     - Price: ${price:.2f}
     - Absolute Hard Floor Support: ${recent_low:.2f}
-    - Market Structure: DUAL-CHANNEL TRACKING ACTIVE (Macro & Micro trends being mapped)
+    - Market Structure: UNIVERSAL DUAL-CHANNEL TRACKING ACTIVE (Macro & Micro trends being mapped via Linear Regression)
     - EMA Trend: {ema_status}
     - RSI: {rsi:.2f}
     - Volatility (ATR): {atr:.2f}
@@ -265,7 +260,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Dual-Channel Multi-Timeframe Engine)...")
+    print("🚀 Bot Started in Quant Mode (Universal Linear Regression Engine)...")
     
     last_full_report_time = 0 
     last_price = 0
@@ -327,4 +322,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️ Crash prevention: {e}")
         
-        time.sleep(121)
+        time.sleep(120)
