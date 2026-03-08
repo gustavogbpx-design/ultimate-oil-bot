@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MUTE_WAIT_SIGNALS = True 
 
-# --- NEW MATH ENGINE: SMART CHANNEL DETECTION ---
+# --- NEW MATH ENGINE: SMART CHANNEL DETECTION (TIGHTENED) ---
 def get_channel_info(plot_data):
     half = len(plot_data) // 2
     
@@ -38,7 +38,7 @@ def get_channel_info(plot_data):
         
     m = (val2 - val1) / (pos2 - pos1)
     
-    # Find the peak BETWEEN the two pivots to get the true channel width
+    # Find the peak BETWEEN the two pivots to get the max channel width
     if (pos2 - pos1) > 1:
         idx_high = plot_data['High'].iloc[pos1:pos2].idxmax()
     else:
@@ -48,17 +48,21 @@ def get_channel_info(plot_data):
     pos_high = plot_data.index.get_loc(idx_high)
     
     support_at_high = m * (pos_high - pos1) + val1
-    offset = val_high - support_at_high
+    max_offset = val_high - support_at_high
     
     # Failsafe
-    if offset <= 0:
-        offset = (plot_data['High'].iloc[pos1:] - (m * (np.arange(pos1, len(plot_data))) + val1)).max()
+    if max_offset <= 0:
+        max_offset = (plot_data['High'].iloc[pos1:] - (m * (np.arange(pos1, len(plot_data))) + val1)).max()
+        
+    # THE FIX: Shrink the channel to the "ash" median line. 
+    # This removes the sky-high white line and sets realistic resistance.
+    true_offset = max_offset / 2 
         
     pos_end = len(plot_data) - 1
     current_support = m * (pos_end - pos1) + val1
-    current_resistance = current_support + offset
+    current_resistance = current_support + true_offset
     
-    return True, current_support, current_resistance, pos1, val1, offset, m
+    return True, current_support, current_resistance, pos1, val1, true_offset, m
 
 # --- 2. GET DATA (25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
@@ -132,11 +136,12 @@ def create_chart(data):
         res_start = support_start + off
         res_end = support_end + off
         
+        # Drawing only the Bottom White Line and the Top Ash/Gray Line
         angled_lines = [
-            [(date_start, support_start), (date_end, support_end)], # Bottom Support
-            [(date_start, res_start), (date_end, res_end)]          # Top Resistance
+            [(date_start, support_start), (date_end, support_end)], # Bottom Support (White)
+            [(date_start, res_start), (date_end, res_end)]          # Tight Resistance (Ash/Gray)
         ]
-        kwargs['alines'] = dict(alines=angled_lines, colors=['white', 'white'], linewidths=2.0)
+        kwargs['alines'] = dict(alines=angled_lines, colors=['white', 'gray'], linewidths=2.0)
 
     mpf.plot(plot_data, **kwargs)
     return fname
@@ -192,7 +197,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
 
     # Feed the channel status to Gemini!
     if ch_exists:
-        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED\n- Active Channel Support (Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ceiling): ${ch_res:.2f}"
+        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
     else:
         channel_info = f"- Market Structure: RANGING MARKET (No clear distinct channel exists right now)"
 
