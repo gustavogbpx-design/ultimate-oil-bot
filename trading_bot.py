@@ -18,59 +18,64 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MUTE_WAIT_SIGNALS = True 
 
-# --- UPGRADED MATH ENGINE: PERCENTILE OUTLIER FILTERING ---
-def get_channel_info(plot_data):
-    half = len(plot_data) // 2
+# --- UPGRADED MATH ENGINE: REUSABLE CHANNEL CALCULATOR ---
+def calculate_channel(slice_data):
+    """Calculates a channel for ANY given slice of data."""
+    if len(slice_data) < 20:
+        return False, [], []
+        
+    half = len(slice_data) // 2
     
-    # 1. Find Pivot Low 1 (First Half)
-    idx1 = plot_data['Low'].iloc[:half].idxmin()
-    val1 = plot_data['Low'].loc[idx1]
-    pos1 = plot_data.index.get_loc(idx1)
+    # 1. Find Pivot Lows
+    idx1 = slice_data['Low'].iloc[:half].idxmin()
+    val1 = slice_data['Low'].loc[idx1]
+    pos1 = slice_data.index.get_loc(idx1)
     
-    # 2. Find Pivot Low 2 (Second Half)
-    idx2 = plot_data['Low'].iloc[half:].idxmin()
-    val2 = plot_data['Low'].loc[idx2]
-    pos2 = plot_data.index.get_loc(idx2)
+    idx2 = slice_data['Low'].iloc[half:].idxmin()
+    val2 = slice_data['Low'].loc[idx2]
+    pos2 = slice_data.index.get_loc(idx2)
     
-    if pos2 <= pos1 or abs(val2 - val1) < 0.50:
-        return False, 0, 0, 0, 0, 0, 0
+    if pos2 <= pos1 or abs(val2 - val1) < 0.20:
+        return False, [], []
         
     m = (val2 - val1) / (pos2 - pos1)
     
-    # 3. THE RED LINE FIX: Calculate offset for EVERY candle in the trend
-    trend_highs = plot_data['High'].iloc[pos1:].values
-    x_trend = np.arange(pos1, len(plot_data))
-    
-    # Calculate where the support line is at every single step
+    # 2. Find Structural Ceiling (92nd Percentile Outlier Filter)
+    trend_highs = slice_data['High'].iloc[pos1:].values
+    x_trend = np.arange(pos1, len(slice_data))
     support_trend = m * (x_trend - pos1) + val1
     
-    # Calculate the vertical distance of every high wick from the support line
     all_offsets = trend_highs - support_trend
-    
-    # Sort the distances from smallest to largest
     sorted_offsets = np.sort(all_offsets)
     
-    # 4. Filter the Parabolic Spike: 
-    # By taking the 92nd percentile, we mathematically erase the top 8% of extreme wicks 
-    # (the massive $92 blowout), anchoring the line to the true structural ceiling.
     if len(sorted_offsets) > 0:
         cutoff_index = int(len(sorted_offsets) * 0.92)
         true_offset = sorted_offsets[cutoff_index]
     else:
-        true_offset = 1.5 # Failsafe
+        true_offset = 1.0
         
-    pos_end = len(plot_data) - 1
-    current_support = m * (pos_end - pos1) + val1
-    current_resistance = current_support + true_offset
+    pos_end = len(slice_data) - 1
     
-    return True, current_support, current_resistance, pos1, val1, true_offset, m
+    date_start = slice_data.index[pos1]
+    date_end = slice_data.index[pos_end]
+    
+    support_start = val1
+    support_end = m * (pos_end - pos1) + val1
+    res_start = support_start + true_offset
+    res_end = support_end + true_offset
+    
+    # Return coordinate pairs for mplfinance
+    support_line = [(date_start, support_start), (date_end, support_end)]
+    resistance_line = [(date_start, res_start), (date_end, res_end)]
+    
+    return True, support_line, resistance_line
 
 # --- 2. GET DATA (25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
     ticker = "CL=F"
     try:
         data = yf.download(ticker, period="25d", interval="1h", progress=False)
-        if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, False, 0, 0
+        if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, None
         
         if isinstance(data.columns, pd.MultiIndex): 
             data.columns = data.columns.droplevel(1)
@@ -95,54 +100,51 @@ def get_market_data():
         ema21 = data["EMA21"].iloc[-1]
         
         trend = "BULLISH 🟢" if data["MACD"].iloc[-1] > data["Signal"].iloc[-1] else "BEARISH 🔴"
+        recent_low = float(data.tail(250)['Low'].min())
         
-        plot_data = data.tail(250) 
-        recent_low = float(plot_data['Low'].min())
-        
-        # Calculate Channel for Gemini
-        ch_exists, ch_sup, ch_res, p1, v1, off, m = get_channel_info(plot_data)
-        
-        return data, price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, ch_sup, ch_res
+        return data, price, rsi, trend, atr, ema50, ema21, recent_low, data.tail(250)
     except Exception as e:
         print(f"Data Error: {e}")
-        return None, 0, 0, "Error", 0, 0, 0, 0, False, 0, 0
+        return None, 0, 0, "Error", 0, 0, 0, 0, None
 
-# --- 3. DRAW CHART (SMART DRAWING) ---
-def create_chart(data):
-    if data is None: return None
+# --- 3. DRAW CHART (DUAL-CHANNEL MODE) ---
+def create_chart(plot_data):
+    if plot_data is None: return None
     fname = "oil_chart.png"
     
-    plot_data = data.tail(250)
     recent_low = plot_data['Low'].min()
     horizontal_lines = [recent_low] 
     
-    ch_exists, ch_sup, ch_res, p1, v1, off, m = get_channel_info(plot_data)
+    # --- CALCULATE TWO SEPARATE CHANNELS ---
+    # 1. Macro Channel (Full 250 hours)
+    macro_exists, macro_sup, macro_res = calculate_channel(plot_data)
+    
+    # 2. Micro Channel (Last 70 hours / ~3 days of aggressive trend)
+    micro_exists, micro_sup, micro_res = calculate_channel(plot_data.tail(70))
 
     mc = mpf.make_marketcolors(up='#00E676', down='#D500F9', edge='inherit', wick='inherit', volume='in')
     iq_style = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc)
     
-    # Base configuration
     kwargs = dict(type='candle', style=iq_style, volume=False, mav=(21, 50), 
                   hlines=dict(hlines=horizontal_lines, colors=['#ffcc00'], linestyle='--'),
                   savefig=fname)
                   
-    # ONLY draw the channel if it actually exists!
-    if ch_exists:
-        pos_end = len(plot_data) - 1
-        date_start = plot_data.index[p1]
-        date_end = plot_data.index[pos_end]
+    lines_to_draw = []
+    line_colors = []
+    line_styles = []
+    
+    if macro_exists:
+        lines_to_draw.extend([macro_sup, macro_res])
+        line_colors.extend(['white', 'gray'])
+        line_styles.extend(['-', '-']) # Solid lines for macro
         
-        support_start = v1
-        support_end = m * (pos_end - p1) + v1
-        res_start = support_start + off
-        res_end = support_end + off
-        
-        # We only draw the Bottom White Support and the Tightly Wrapped Ash Resistance
-        angled_lines = [
-            [(date_start, support_start), (date_end, support_end)], 
-            [(date_start, res_start), (date_end, res_end)]          
-        ]
-        kwargs['alines'] = dict(alines=angled_lines, colors=['white', 'gray'], linewidths=2.0)
+    if micro_exists:
+        lines_to_draw.extend([micro_sup, micro_res])
+        line_colors.extend(['#00aaff', '#00aaff']) # Neon Blue for micro
+        line_styles.extend(['--', '--']) # Dashed lines for micro
+
+    if lines_to_draw:
+        kwargs['alines'] = dict(alines=lines_to_draw, colors=line_colors, linestyle=line_styles, linewidths=2.0)
 
     mpf.plot(plot_data, **kwargs)
     return fname
@@ -183,11 +185,10 @@ def get_valid_model():
     except: pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (SMART CHANNEL AWARENESS INJECTED) ---
-def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, ch_sup, ch_res, headlines, alert_reason):
+# --- 6. ANALYZE (DUAL CHANNEL AWARENESS) ---
+def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
-    
     current_time_str = time.strftime("%A, %b %d, %Y - %H:%M UTC", time.gmtime())
     
     stop_loss_buy = price - (1.5 * atr)
@@ -195,11 +196,6 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     stop_loss_sell = price + (1.5 * atr) 
     take_profit_sell = price - (2.5 * atr)
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
-
-    if ch_exists:
-        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED (Outliers mathematically filtered)\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
-    else:
-        channel_info = f"- Market Structure: RANGING MARKET (No distinct structural channel detected)"
 
     prompt = f"""
     Act as a Tactical Hedge Fund Algo (Day Trading Desk). 
@@ -213,7 +209,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     TECHNICAL DATA (1-Hour Chart):
     - Price: ${price:.2f}
     - Absolute Hard Floor Support: ${recent_low:.2f}
-    {channel_info}
+    - Market Structure: DUAL-CHANNEL TRACKING ACTIVE (Macro & Micro trends being mapped)
     - EMA Trend: {ema_status}
     - RSI: {rsi:.2f}
     - Volatility (ATR): {atr:.2f}
@@ -222,11 +218,9 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     You are a Tactical Day Trader. Your directive is to find actionable setups without overtrading.
     
     1. TIME-FILTER THE NEWS (CRITICAL): Compare the news timestamps to the CURRENT SYSTEM TIME. 
-    2. CALCULATE CONVICTION: Rate the setup from 0% to 100%. If the market is completely flat or ranging, Conviction is LOW.
+    2. CALCULATE CONVICTION: Rate the setup from 0% to 100%. 
     3. ASSESS RISK LEVEL: [🟢 LOW / 🟡 MEDIUM / 🔴 HIGH]
-    4. DECIDE ACTION: 
-       - If Conviction is LESS THAN 45%, your Action MUST be "STRICT WAIT". 
-       - If Conviction is 45% or higher, output "BUY" or "SELL". Check the channel status! The active Resistance is now the 'ash' line provided.
+    4. DECIDE ACTION: [BUY / SELL / STRICT WAIT]
     
     CALCULATED LIMITS:
     - BUY Setup: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
@@ -247,7 +241,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Explain your reasoning. Specifically analyze how the price is interacting with the structurally calculated support/resistance boundaries that have mathematically ignored the rightmost breakout peak.]
+    - [Explain your reasoning based on the latest data.]
     """
 
     try:
@@ -271,7 +265,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Percentile Outlier Filtering)...")
+    print("🚀 Bot Started in Quant Mode (Dual-Channel Multi-Timeframe Engine)...")
     
     last_full_report_time = 0 
     last_price = 0
@@ -280,7 +274,7 @@ if __name__ == "__main__":
     while True:
         try:
             print("Sentry checking market quietly...")
-            data, price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, ch_sup, ch_res = get_market_data()
+            data, price, rsi, trend, atr, ema50, ema21, recent_low, plot_data = get_market_data()
             headlines, raw_entries = get_news()
             
             if data is None:
@@ -313,9 +307,9 @@ if __name__ == "__main__":
 
             if is_emergency or is_time_up:
                 print(f"⚠️ Waking up Gemini! Reason: {alert_reason}")
-                chart = create_chart(data)
+                chart = create_chart(plot_data)
                 
-                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, ch_sup, ch_res, headlines, alert_reason)
+                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason)
                 
                 is_wait_signal = "STRICT WAIT" in analysis.upper()
                 
