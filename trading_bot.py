@@ -18,27 +18,28 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MUTE_WAIT_SIGNALS = True 
 
-# --- NEW MATH ENGINE: SMART CHANNEL DETECTION (TIGHTENED) ---
+# --- NEW MATH ENGINE: EXACT STRUCTURAL PIVOT CHANNELS ---
 def get_channel_info(plot_data):
     half = len(plot_data) // 2
     
-    # Find Pivot 1 (First Half Low)
+    # 1. Find Pivot Low 1 (First Half)
     idx1 = plot_data['Low'].iloc[:half].idxmin()
     val1 = plot_data['Low'].loc[idx1]
     pos1 = plot_data.index.get_loc(idx1)
     
-    # Find Pivot 2 (Second Half Low)
+    # 2. Find Pivot Low 2 (Second Half)
     idx2 = plot_data['Low'].iloc[half:].idxmin()
     val2 = plot_data['Low'].loc[idx2]
     pos2 = plot_data.index.get_loc(idx2)
     
-    # If the price is flat (less than $0.50 move) or math breaks, NO CHANNEL exists.
+    # If the price is flat or math breaks, NO CHANNEL exists.
     if pos2 <= pos1 or abs(val2 - val1) < 0.50:
         return False, 0, 0, 0, 0, 0, 0
         
     m = (val2 - val1) / (pos2 - pos1)
     
-    # Find the peak BETWEEN the two pivots to get the max channel width
+    # 3. THE FIX: Find the exact Swing High STRICTLY BETWEEN the two bottom pivots.
+    # This ignores the massive parabolic breakout and finds the true channel ceiling.
     if (pos2 - pos1) > 1:
         idx_high = plot_data['High'].iloc[pos1:pos2].idxmax()
     else:
@@ -47,16 +48,13 @@ def get_channel_info(plot_data):
     val_high = plot_data['High'].loc[idx_high]
     pos_high = plot_data.index.get_loc(idx_high)
     
+    # Calculate the vertical distance from the support line to this exact middle peak
     support_at_high = m * (pos_high - pos1) + val1
-    max_offset = val_high - support_at_high
+    true_offset = val_high - support_at_high
     
-    # Failsafe
-    if max_offset <= 0:
-        max_offset = (plot_data['High'].iloc[pos1:] - (m * (np.arange(pos1, len(plot_data))) + val1)).max()
-        
-    # THE FIX: Shrink the channel to the "ash" median line. 
-    # This removes the sky-high white line and sets realistic resistance.
-    true_offset = max_offset / 2 
+    # Failsafe in case of weird wicks
+    if true_offset <= 0:
+        true_offset = 1.5 # Standard fallback width
         
     pos_end = len(plot_data) - 1
     current_support = m * (pos_end - pos1) + val1
@@ -136,10 +134,10 @@ def create_chart(data):
         res_start = support_start + off
         res_end = support_end + off
         
-        # Drawing only the Bottom White Line and the Top Ash/Gray Line
+        # Bottom Support (White) and Tight True Resistance (Gray/Ash)
         angled_lines = [
-            [(date_start, support_start), (date_end, support_end)], # Bottom Support (White)
-            [(date_start, res_start), (date_end, res_end)]          # Tight Resistance (Ash/Gray)
+            [(date_start, support_start), (date_end, support_end)], 
+            [(date_start, res_start), (date_end, res_end)]          
         ]
         kwargs['alines'] = dict(alines=angled_lines, colors=['white', 'gray'], linewidths=2.0)
 
@@ -195,7 +193,6 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     take_profit_sell = price - (2.5 * atr)
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
-    # Feed the channel status to Gemini!
     if ch_exists:
         channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
     else:
@@ -333,4 +330,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️ Crash prevention: {e}")
         
-        time.sleep(121)
+        time.sleep(120)
