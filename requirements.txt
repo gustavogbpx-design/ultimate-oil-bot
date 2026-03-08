@@ -6,3 +6,5 @@ pandas
 feedparser
 mplfinance
 matplotlib
+scipy
+numpy
