@@ -7,6 +7,7 @@ import feedparser
 import pandas as pd
 import numpy as np
 import mplfinance as mpf
+from scipy.signal import argrelextrema # NEW: Required for outlier peak detection
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
@@ -18,43 +19,65 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MUTE_WAIT_SIGNALS = True 
 
-# --- NEW MATH ENGINE: EXACT STRUCTURAL PIVOT CHANNELS ---
+# --- UPGRADED MATH ENGINE: TACTICAL PEAK & OUTLIER FILTERING ---
 def get_channel_info(plot_data):
     half = len(plot_data) // 2
     
-    # 1. Find Pivot Low 1 (First Half)
+    # 1. Base Gradient Detection (Connect major bottom swing lows)
     idx1 = plot_data['Low'].iloc[:half].idxmin()
     val1 = plot_data['Low'].loc[idx1]
     pos1 = plot_data.index.get_loc(idx1)
     
-    # 2. Find Pivot Low 2 (Second Half)
     idx2 = plot_data['Low'].iloc[half:].idxmin()
     val2 = plot_data['Low'].loc[idx2]
     pos2 = plot_data.index.get_loc(idx2)
     
-    # If the price is flat or math breaks, NO CHANNEL exists.
     if pos2 <= pos1 or abs(val2 - val1) < 0.50:
         return False, 0, 0, 0, 0, 0, 0
         
     m = (val2 - val1) / (pos2 - pos1)
     
-    # 3. THE FIX: Find the exact Swing High STRICTLY BETWEEN the two bottom pivots.
-    # This ignores the massive parabolic breakout and finds the true channel ceiling.
-    if (pos2 - pos1) > 1:
-        idx_high = plot_data['High'].iloc[pos1:pos2].idxmax()
-    else:
-        idx_high = plot_data['High'].iloc[pos1:].idxmax()
+    # 2. IMPLEMENT USER LOGIC: Extract all Local Peaks within the general trend.
+    # We look for wicks that are local maximas in a rolling window of 20 candles.
+    highs = plot_data['High'].values
+    local_peaks = argrelextrema(highs, np.greater, order=20)[0]
+    
+    # We only care about peaks that occurred AFTER our first bottom pivot.
+    relevant_peaks = local_peaks[local_peaks >= pos1]
+    
+    # 3. IMPLEMENT USER LOGIC: Find which local peaks best align with the gradient.
+    # We calculate the vertical offset from the support line for *every single peak*.
+    offsets = []
+    for peak_pos in relevant_peaks:
+        support_val_at_peak = m * (peak_pos - pos1) + val1
+        peak_offset = highs[peak_pos] - support_val_at_peak
+        offsets.append(peak_offset)
         
-    val_high = plot_data['High'].loc[idx_high]
-    pos_high = plot_data.index.get_loc(idx_high)
+    # Failsafe if we found no peaks
+    if len(offsets) < 2:
+        kwargs['alines'] = dict(alines=[], colors=[]) # Ensure no empty aline drawing
+        return False, 0, 0, 0, 0, 0, 0
+
+    # 4. IMPLEMENT USER LOGIC: TREAT RIGHT HIGHEST AS OUTLIER.
+    # Use statistical IQR filtering to find the common cluster of offsets, 
+    # effectively ignoring the major parabolic breakout peak.
+    offset_s = pd.Series(offsets)
+    q1 = offset_s.quantile(0.25)
+    q3 = offset_s.quantile(0.75)
+    iqr = q3 - q1
     
-    # Calculate the vertical distance from the support line to this exact middle peak
-    support_at_high = m * (pos_high - pos1) + val1
-    true_offset = val_high - support_at_high
+    # Define statistical 'outlier' boundaries.
+    upper_bound = q3 + (1.5 * iqr)
     
-    # Failsafe in case of weird wicks
-    if true_offset <= 0:
-        true_offset = 1.5 # Standard fallback width
+    # Create a new "safe" list that ignores the breakout outlier.
+    safe_offsets = offset_s[offset_s < upper_bound]
+    
+    # 5. Final Selection: Select the single highest of the remaining STRUCTURAL peaks.
+    # This anchors the grey line to the exact "red place" you want on the left.
+    if safe_offsets.empty:
+        true_offset = offset_s.median() # Statistical median is the failsafe mode.
+    else:
+        true_offset = safe_offsets.max() # Select highest *non-outlier* peak.
         
     pos_end = len(plot_data) - 1
     current_support = m * (pos_end - pos1) + val1
@@ -134,7 +157,7 @@ def create_chart(data):
         res_start = support_start + off
         res_end = support_end + off
         
-        # Bottom Support (White) and Tight True Resistance (Gray/Ash)
+        # We only draw the Bottom White Support and the Tightly Wrapped Ash Resistance
         angled_lines = [
             [(date_start, support_start), (date_end, support_end)], 
             [(date_start, res_start), (date_end, res_end)]          
@@ -194,9 +217,9 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
     if ch_exists:
-        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
+        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED (Outliers mathematically filtered)\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
     else:
-        channel_info = f"- Market Structure: RANGING MARKET (No clear distinct channel exists right now)"
+        channel_info = f"- Market Structure: RANGING MARKET (No distinct structural channel detected)"
 
     prompt = f"""
     Act as a Tactical Hedge Fund Algo (Day Trading Desk). 
@@ -223,7 +246,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     3. ASSESS RISK LEVEL: [🟢 LOW / 🟡 MEDIUM / 🔴 HIGH]
     4. DECIDE ACTION: 
        - If Conviction is LESS THAN 45%, your Action MUST be "STRICT WAIT". 
-       - If Conviction is 45% or higher, output "BUY" or "SELL". Check the channel status! If Price is hitting Channel Support, BUY. If hitting Resistance, SELL.
+       - If Conviction is 45% or higher, output "BUY" or "SELL". Check the channel status! The active Resistance is now the 'ash' line provided.
     
     CALCULATED LIMITS:
     - BUY Setup: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
@@ -244,7 +267,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Explain your reasoning. Specifically analyze if the market is trending in a channel or ranging, and how the current price interacts with the active Support/Resistance numbers provided.]
+    - [Explain your reasoning. Specifically analyze how the price is interacting with the structurally calculated support/resistance boundaries that have mathematically ignored the rightmost breakout peak.]
     """
 
     try:
@@ -268,7 +291,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Smart Channel Detection & AI Injection)...")
+    print("🚀 Bot Started in Quant Mode (Scipy Peak Filtering & Outlier Removal)...")
     
     last_full_report_time = 0 
     last_price = 0
