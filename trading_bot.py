@@ -5,7 +5,7 @@ import yfinance as yf
 import requests
 import feedparser
 import pandas as pd
-import numpy as np  # <-- NEW: Required for the algorithmic channel math
+import numpy as np  # Required for the algorithmic channel math
 import mplfinance as mpf
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
@@ -21,11 +21,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Set to False: Bot messages you every 30 minutes, even if it says "STRICT WAIT".
 MUTE_WAIT_SIGNALS = True 
 
-# --- 2. GET DATA (UPGRADED: 15 DAYS / 1-HOUR MODE) ---
+# --- 2. GET DATA (15 DAYS / 1-HOUR MODE) ---
 def get_market_data():
     ticker = "CL=F"
     try:
-        # Changed to 15 days, 1-hour interval for macro trendline accuracy
+        # Pulling 15 days of 1-hour candles for accurate macro trends
         data = yf.download(ticker, period="15d", interval="1h", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, 0
         
@@ -65,7 +65,7 @@ def get_market_data():
         print(f"Data Error: {e}")
         return None, 0, 0, "Error", 0, 0, 0, 0, 0
 
-# --- 3. DRAW CHART (UPGRADED: LINEAR REGRESSION CHANNELS) ---
+# --- 3. DRAW CHART (DARK MODE + VISIBLE CHANNELS) ---
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
@@ -73,7 +73,7 @@ def create_chart(data):
     # We plot the last 150 hours to make the lines clearly visible
     plot_data = data.tail(150)
     
-    # 1. Math for Horizontal Support & Resistance (Yellow & Blue lines)
+    # 1. Math for Horizontal Support & Resistance
     recent_high = plot_data['High'].max()
     recent_low = plot_data['Low'].min()
     horizontal_lines = [recent_high, recent_low]
@@ -106,10 +106,10 @@ def create_chart(data):
         [(date_start, upper_channel[0]), (date_end, upper_channel[-1])]  # Resistance Ceiling
     ]
     
-    # Draw the chart
-    mpf.plot(plot_data, type='candle', style='charles', volume=False, mav=(21, 50), 
-             hlines=dict(hlines=horizontal_lines, colors=['b', 'y'], linestyle='--'),
-             alines=dict(alines=angled_lines, colors=['w', 'w'], linewidths=1.5),
+    # Draw the chart using DARK MODE ('nightclouds') and thicker white lines
+    mpf.plot(plot_data, type='candle', style='nightclouds', volume=False, mav=(21, 50), 
+             hlines=dict(hlines=horizontal_lines, colors=['#00aaff', '#ffcc00'], linestyle='--'),
+             alines=dict(alines=angled_lines, colors=['white', 'white'], linewidths=2.0),
              savefig=fname)
     return fname
 
@@ -149,7 +149,7 @@ def get_valid_model():
     except: pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (UPGRADED: 1H CHART + S/R AWARENESS) ---
+# --- 6. ANALYZE (1H CHART + S/R AWARENESS) ---
 def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_high, recent_low, headlines, alert_reason):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
@@ -242,7 +242,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Algorithmic Trendlines, 1H Data, 45% Threshold)...")
+    print("🚀 Bot Started in Quant Mode (Dark Chart, Algo Trendlines, 1H Data)...")
     
     last_full_report_time = 0 
     last_price = 0
