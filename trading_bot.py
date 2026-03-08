@@ -1,6 +1,7 @@
 import os
 import time
 import calendar
+import base64 # NEW: Required for Gemini Vision
 import yfinance as yf
 import requests
 import feedparser
@@ -28,7 +29,6 @@ def calculate_universal_channel(slice_data, cutoff_pct=0.92):
     y = slice_data['Close'].values
     
     # 1. Find the universal Line of Best Fit (Works for Up, Down, or Flat trends)
-    # m = slope (direction), b = intercept (starting height)
     m, b = np.polyfit(x, y, 1)
     
     # Create the center mathematical line
@@ -38,12 +38,11 @@ def calculate_universal_channel(slice_data, cutoff_pct=0.92):
     high_offsets = slice_data['High'].values - reg_line
     low_offsets = reg_line - slice_data['Low'].values
     
-    # 3. Apply the Percentile Filter to BOTH sides (Ignores flash crashes and breakout spikes)
+    # 3. Apply the Percentile Filter to BOTH sides
     sorted_highs = np.sort(high_offsets)
     sorted_lows = np.sort(low_offsets)
     
     if len(sorted_highs) > 0 and len(sorted_lows) > 0:
-        # Prevent index out of bounds
         cutoff_idx = int(len(sorted_highs) * cutoff_pct)
         cutoff_idx = min(cutoff_idx, len(sorted_highs) - 1)
         
@@ -59,7 +58,6 @@ def calculate_universal_channel(slice_data, cutoff_pct=0.92):
     date_start = slice_data.index[0]
     date_end = slice_data.index[-1]
     
-    # Return coordinate pairs for mplfinance
     support_line = [(date_start, lower_channel[0]), (date_end, lower_channel[-1])]
     resistance_line = [(date_start, upper_channel[0]), (date_end, upper_channel[-1])]
     
@@ -67,7 +65,7 @@ def calculate_universal_channel(slice_data, cutoff_pct=0.92):
 
 # --- 2. GET DATA (25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
-    ticker = "CL=F"
+    ticker = "CL=F" # WTI Crude Oil
     try:
         data = yf.download(ticker, period="25d", interval="1h", progress=False)
         if data.empty: return None, 0, 0, "No Data", 0, 0, 0, 0, None
@@ -79,6 +77,7 @@ def get_market_data():
         if hasattr(close, "shape") and len(close.shape) > 1: close = close.iloc[:, 0]
         data["Close"] = close
 
+        # Keeping all technical indicators untouched!
         data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
         macd = MACD(close=data["Close"])
         data["MACD"] = macd.macd()
@@ -110,7 +109,6 @@ def create_chart(plot_data):
     recent_low = plot_data['Low'].min()
     horizontal_lines = [recent_low] 
     
-    # --- CALCULATE UNIVERSAL CHANNELS ---
     # 1. Macro Channel: Full 25-day trend, filtering out top/bottom 8% of wicks
     macro_exists, macro_sup, macro_res = calculate_universal_channel(plot_data, cutoff_pct=0.92)
     
@@ -180,8 +178,9 @@ def get_valid_model():
     except: pass
     return "models/gemini-1.5-flash"
 
-# --- 6. ANALYZE (UNIVERSAL CHANNEL AWARENESS) ---
-def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason):
+# --- 6. ANALYZE (VISION ENABLED FOR OIL) ---
+# ADDED chart_file parameter here!
+def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason, chart_file):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
     current_time_str = time.strftime("%A, %b %d, %Y - %H:%M UTC", time.gmtime())
@@ -201,19 +200,25 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     GLOBAL NEWS FEED (WITH TIMESTAMPS):
     {news_text}
     
-    TECHNICAL DATA (1-Hour Chart):
+    TECHNICAL DATA (1-Hour Chart - WTI Crude Oil):
     - Price: ${price:.2f}
     - Absolute Hard Floor Support: ${recent_low:.2f}
-    - Market Structure: UNIVERSAL DUAL-CHANNEL TRACKING ACTIVE (Macro & Micro trends being mapped via Linear Regression)
     - EMA Trend: {ema_status}
     - RSI: {rsi:.2f}
     - Volatility (ATR): {atr:.2f}
+    
+    IMAGE ANALYSIS DIRECTIVE:
+    I have provided an image of the current 1-Hour chart. 
+    - The solid WHITE line is the Macro Support Floor.
+    - The solid GREY/ASH line is the Macro Resistance Ceiling.
+    - The dashed NEON BLUE lines represent the aggressive Micro Channel over the last 3 days.
+    Look at the image! Where are the current candlesticks relative to these lines? Is it bouncing off support, breaking a channel, or hitting a ceiling?
     
     TASK:
     You are a Tactical Day Trader. Your directive is to find actionable setups without overtrading.
     
     1. TIME-FILTER THE NEWS (CRITICAL): Compare the news timestamps to the CURRENT SYSTEM TIME. 
-    2. CALCULATE CONVICTION: Rate the setup from 0% to 100%. 
+    2. CALCULATE CONVICTION: Rate the setup from 0% to 100% based heavily on your visual analysis of the provided chart image combined with the technicals and news.
     3. ASSESS RISK LEVEL: [🟢 LOW / 🟡 MEDIUM / 🔴 HIGH]
     4. DECIDE ACTION: [BUY / SELL / STRICT WAIT]
     
@@ -229,6 +234,9 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     🌍 **MARKET DRIVER**
     [Identify the #1 freshest factor from the news. Explain in 1 sentence.]
     
+    👁️ **CHART VISION ANALYSIS**
+    [Describe exactly what you see in the image. Where is the price touching the lines?]
+    
     💎 **TRADE DECISION**
     Action: [BUY / SELL / STRICT WAIT]
     Entry: ${price:.2f}
@@ -236,12 +244,29 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Explain your reasoning based on the latest data.]
+    - [Explain your reasoning based on the visual data, technical numbers, and recent news.]
     """
+
+    # --- IMAGE ENCODING FOR GEMINI ---
+    parts = [{"text": prompt}]
+    
+    if chart_file and os.path.exists(chart_file):
+        with open(chart_file, "rb") as f:
+            encoded_image = base64.b64encode(f.read()).decode("utf-8")
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/png",
+                "data": encoded_image
+            }
+        })
+
+    payload = {
+        "contents": [{"parts": parts}]
+    }
 
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_KEY}"
-        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, headers={'Content-Type': 'application/json'})
+        resp = requests.post(url, json=payload, headers={'Content-Type': 'application/json'})
         if resp.status_code == 200:
             return f"🧠 **AI SIGNAL ({model_name.split('/')[-1]}):**\n{resp.json()['candidates'][0]['content']['parts'][0]['text']}"
         else: return f"⚠️ AI Error: {resp.status_code} - {resp.text}"
@@ -260,7 +285,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Universal Linear Regression Engine)...")
+    print("🚀 Oil Bot Started in Quant Mode (Vision-Enabled Multimodal Engine)...")
     
     last_full_report_time = 0 
     last_price = 0
@@ -268,7 +293,7 @@ if __name__ == "__main__":
 
     while True:
         try:
-            print("Sentry checking market quietly...")
+            print("Sentry checking Oil market quietly...")
             data, price, rsi, trend, atr, ema50, ema21, recent_low, plot_data = get_market_data()
             headlines, raw_entries = get_news()
             
@@ -280,6 +305,7 @@ if __name__ == "__main__":
             is_emergency = False
             alert_reason = "Regular 30-min Check"
 
+            # Kept the 0.50 threshold for Oil
             if last_price > 0 and abs(price - last_price) >= 0.50:
                 is_emergency = True
                 alert_reason = f"PRICE SPIKE! Moved ${abs(price - last_price):.2f} suddenly!"
@@ -302,9 +328,12 @@ if __name__ == "__main__":
 
             if is_emergency or is_time_up:
                 print(f"⚠️ Waking up Gemini! Reason: {alert_reason}")
+                
+                # 1. CREATE THE CHART FIRST
                 chart = create_chart(plot_data)
                 
-                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason)
+                # 2. PASS THE CHART TO GEMINI FOR VISUAL ANALYSIS
+                analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason, chart)
                 
                 is_wait_signal = "STRICT WAIT" in analysis.upper()
                 
