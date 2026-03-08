@@ -5,6 +5,7 @@ import yfinance as yf
 import requests
 import feedparser
 import pandas as pd
+import numpy as np  # <-- NEW: Required for the algorithmic channel math
 import mplfinance as mpf
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
@@ -64,7 +65,7 @@ def get_market_data():
         print(f"Data Error: {e}")
         return None, 0, 0, "Error", 0, 0, 0, 0, 0
 
-# --- 3. DRAW CHART (UPGRADED: ALGORITHMIC TRENDLINES) ---
+# --- 3. DRAW CHART (UPGRADED: LINEAR REGRESSION CHANNELS) ---
 def create_chart(data):
     if data is None: return None
     fname = "oil_chart.png"
@@ -77,23 +78,35 @@ def create_chart(data):
     recent_low = plot_data['Low'].min()
     horizontal_lines = [recent_high, recent_low]
     
-    # 2. Math for Trendlines (Linear Geometry)
-    # Split the timeline in half to find structural lower-lows and higher-highs
-    mid = len(plot_data) // 2
+    # 2. Math for Trendlines (Linear Regression Channel)
+    x = np.arange(len(plot_data))
+    y = plot_data['Close'].values
     
-    p1_min = plot_data['Low'].iloc[:mid].idxmin()
-    p2_min = plot_data['Low'].iloc[mid:].idxmin()
+    # Calculate the slope (m) and intercept (b) of the main trend
+    m, b = np.polyfit(x, y, 1)
     
-    p1_max = plot_data['High'].iloc[:mid].idxmax()
-    p2_max = plot_data['High'].iloc[mid:].idxmax()
+    # Create the central regression line
+    reg_line = m * x + b
     
-    # Create coordinate pairs for mplfinance (Date, Price)
+    # Find the maximum distance from the center line to the highs and lows
+    upper_offset = (plot_data['High'].values - reg_line).max()
+    lower_offset = (reg_line - plot_data['Low'].values).max()
+    
+    # Create the top and bottom channel lines
+    upper_channel = reg_line + upper_offset
+    lower_channel = reg_line - lower_offset
+    
+    # Grab the start and end dates for the exact coordinates
+    date_start = plot_data.index[0]
+    date_end = plot_data.index[-1]
+    
+    # Create coordinate pairs for mplfinance: [(Date1, Price1), (Date2, Price2)]
     angled_lines = [
-        [(p1_min, plot_data['Low'].loc[p1_min]), (p2_min, plot_data['Low'].loc[p2_min])], # Support Channel
-        [(p1_max, plot_data['High'].loc[p1_max]), (p2_max, plot_data['High'].loc[p2_max])]  # Resistance Channel
+        [(date_start, lower_channel[0]), (date_end, lower_channel[-1])], # Support Floor
+        [(date_start, upper_channel[0]), (date_end, upper_channel[-1])]  # Resistance Ceiling
     ]
     
-    # Draw the chart with moving averages, horizontal S/R, and angled trendlines
+    # Draw the chart
     mpf.plot(plot_data, type='candle', style='charles', volume=False, mav=(21, 50), 
              hlines=dict(hlines=horizontal_lines, colors=['b', 'y'], linestyle='--'),
              alines=dict(alines=angled_lines, colors=['w', 'w'], linewidths=1.5),
