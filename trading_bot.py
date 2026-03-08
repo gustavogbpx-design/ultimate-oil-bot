@@ -7,7 +7,6 @@ import feedparser
 import pandas as pd
 import numpy as np
 import mplfinance as mpf
-from scipy.signal import argrelextrema # NEW: Required for outlier peak detection
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
@@ -19,15 +18,16 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MUTE_WAIT_SIGNALS = True 
 
-# --- UPGRADED MATH ENGINE: TACTICAL PEAK & OUTLIER FILTERING ---
+# --- UPGRADED MATH ENGINE: STRICT STRUCTURAL GEOMETRY ---
 def get_channel_info(plot_data):
     half = len(plot_data) // 2
     
-    # 1. Base Gradient Detection (Connect major bottom swing lows)
+    # 1. Find Pivot Low 1 (First Half)
     idx1 = plot_data['Low'].iloc[:half].idxmin()
     val1 = plot_data['Low'].loc[idx1]
     pos1 = plot_data.index.get_loc(idx1)
     
+    # 2. Find Pivot Low 2 (Second Half)
     idx2 = plot_data['Low'].iloc[half:].idxmin()
     val2 = plot_data['Low'].loc[idx2]
     pos2 = plot_data.index.get_loc(idx2)
@@ -37,53 +37,35 @@ def get_channel_info(plot_data):
         
     m = (val2 - val1) / (pos2 - pos1)
     
-    # 2. IMPLEMENT USER LOGIC: Extract all Local Peaks within the general trend.
-    # We look for wicks that are local maximas in a rolling window of 20 candles.
-    highs = plot_data['High'].values
-    local_peaks = argrelextrema(highs, np.greater, order=20)[0]
-    
-    # We only care about peaks that occurred AFTER our first bottom pivot.
-    relevant_peaks = local_peaks[local_peaks >= pos1]
-    
-    # 3. IMPLEMENT USER LOGIC: Find which local peaks best align with the gradient.
-    # We calculate the vertical offset from the support line for *every single peak*.
-    offsets = []
-    for peak_pos in relevant_peaks:
-        support_val_at_peak = m * (peak_pos - pos1) + val1
-        peak_offset = highs[peak_pos] - support_val_at_peak
-        offsets.append(peak_offset)
-        
-    # Failsafe if we found no peaks
-    if len(offsets) < 2:
-        kwargs['alines'] = dict(alines=[], colors=[]) # Ensure no empty aline drawing
-        return False, 0, 0, 0, 0, 0, 0
-
-    # 4. IMPLEMENT USER LOGIC: TREAT RIGHT HIGHEST AS OUTLIER.
-    # Use statistical IQR filtering to find the common cluster of offsets, 
-    # effectively ignoring the major parabolic breakout peak.
-    offset_s = pd.Series(offsets)
-    q1 = offset_s.quantile(0.25)
-    q3 = offset_s.quantile(0.75)
-    iqr = q3 - q1
-    
-    # Define statistical 'outlier' boundaries.
-    upper_bound = q3 + (1.5 * iqr)
-    
-    # Create a new "safe" list that ignores the breakout outlier.
-    safe_offsets = offset_s[offset_s < upper_bound]
-    
-    # 5. Final Selection: Select the single highest of the remaining STRUCTURAL peaks.
-    # This anchors the grey line to the exact "red place" you want on the left.
-    if safe_offsets.empty:
-        true_offset = offset_s.median() # Statistical median is the failsafe mode.
+    # 3. THE RED LINE FIX: Find the ceiling using ONLY the structure BETWEEN the pivots.
+    # This mathematically blinds the bot to the massive $92 outlier at the end.
+    if (pos2 - pos1) > 2:
+        # Search strictly between the two bottom pivots
+        search_zone = plot_data.iloc[pos1:pos2]
     else:
-        true_offset = safe_offsets.max() # Select highest *non-outlier* peak.
+        # Failsafe if they are too close: just look at the first 30% of the trend
+        end_search = pos1 + int((len(plot_data) - pos1) * 0.30)
+        search_zone = plot_data.iloc[pos1:end_search]
+        
+    # Calculate the exact vertical offset for the highest structural peak in the safe zone
+    max_offset = 0
+    for i in range(len(search_zone)):
+        current_pos = pos1 + i
+        actual_high = search_zone['High'].iloc[i]
+        support_at_pos = m * (current_pos - pos1) + val1
+        offset = actual_high - support_at_pos
+        if offset > max_offset:
+            max_offset = offset
+            
+    # Failsafe width if something goes wrong
+    if max_offset <= 0:
+        max_offset = 1.5 
         
     pos_end = len(plot_data) - 1
     current_support = m * (pos_end - pos1) + val1
-    current_resistance = current_support + true_offset
+    current_resistance = current_support + max_offset
     
-    return True, current_support, current_resistance, pos1, val1, true_offset, m
+    return True, current_support, current_resistance, pos1, val1, max_offset, m
 
 # --- 2. GET DATA (25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
@@ -217,7 +199,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
     if ch_exists:
-        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED (Outliers mathematically filtered)\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
+        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED (Outliers filtered)\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
     else:
         channel_info = f"- Market Structure: RANGING MARKET (No distinct structural channel detected)"
 
@@ -267,7 +249,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Explain your reasoning. Specifically analyze how the price is interacting with the structurally calculated support/resistance boundaries that have mathematically ignored the rightmost breakout peak.]
+    - [Explain your reasoning. Specifically analyze how the price is interacting with the structurally calculated support/resistance boundaries.]
     """
 
     try:
@@ -291,7 +273,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Scipy Peak Filtering & Outlier Removal)...")
+    print("🚀 Bot Started in Quant Mode (Strict Structural Geometry)...")
     
     last_full_report_time = 0 
     last_price = 0
