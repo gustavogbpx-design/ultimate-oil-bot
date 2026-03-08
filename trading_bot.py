@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 MUTE_WAIT_SIGNALS = True 
 
-# --- UPGRADED MATH ENGINE: STRICT STRUCTURAL GEOMETRY ---
+# --- UPGRADED MATH ENGINE: PERCENTILE OUTLIER FILTERING ---
 def get_channel_info(plot_data):
     half = len(plot_data) // 2
     
@@ -37,35 +37,33 @@ def get_channel_info(plot_data):
         
     m = (val2 - val1) / (pos2 - pos1)
     
-    # 3. THE RED LINE FIX: Find the ceiling using ONLY the structure BETWEEN the pivots.
-    # This mathematically blinds the bot to the massive $92 outlier at the end.
-    if (pos2 - pos1) > 2:
-        # Search strictly between the two bottom pivots
-        search_zone = plot_data.iloc[pos1:pos2]
+    # 3. THE RED LINE FIX: Calculate offset for EVERY candle in the trend
+    trend_highs = plot_data['High'].iloc[pos1:].values
+    x_trend = np.arange(pos1, len(plot_data))
+    
+    # Calculate where the support line is at every single step
+    support_trend = m * (x_trend - pos1) + val1
+    
+    # Calculate the vertical distance of every high wick from the support line
+    all_offsets = trend_highs - support_trend
+    
+    # Sort the distances from smallest to largest
+    sorted_offsets = np.sort(all_offsets)
+    
+    # 4. Filter the Parabolic Spike: 
+    # By taking the 92nd percentile, we mathematically erase the top 8% of extreme wicks 
+    # (the massive $92 blowout), anchoring the line to the true structural ceiling.
+    if len(sorted_offsets) > 0:
+        cutoff_index = int(len(sorted_offsets) * 0.92)
+        true_offset = sorted_offsets[cutoff_index]
     else:
-        # Failsafe if they are too close: just look at the first 30% of the trend
-        end_search = pos1 + int((len(plot_data) - pos1) * 0.30)
-        search_zone = plot_data.iloc[pos1:end_search]
-        
-    # Calculate the exact vertical offset for the highest structural peak in the safe zone
-    max_offset = 0
-    for i in range(len(search_zone)):
-        current_pos = pos1 + i
-        actual_high = search_zone['High'].iloc[i]
-        support_at_pos = m * (current_pos - pos1) + val1
-        offset = actual_high - support_at_pos
-        if offset > max_offset:
-            max_offset = offset
-            
-    # Failsafe width if something goes wrong
-    if max_offset <= 0:
-        max_offset = 1.5 
+        true_offset = 1.5 # Failsafe
         
     pos_end = len(plot_data) - 1
     current_support = m * (pos_end - pos1) + val1
-    current_resistance = current_support + max_offset
+    current_resistance = current_support + true_offset
     
-    return True, current_support, current_resistance, pos1, val1, max_offset, m
+    return True, current_support, current_resistance, pos1, val1, true_offset, m
 
 # --- 2. GET DATA (25 DAYS / 1-HOUR MODE) ---
 def get_market_data():
@@ -199,7 +197,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
     if ch_exists:
-        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED (Outliers filtered)\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
+        channel_info = f"- Market Structure: TRENDING CHANNEL DETECTED (Outliers mathematically filtered)\n- Active Channel Support (White Floor): ${ch_sup:.2f}\n- Active Channel Resistance (Ash Ceiling): ${ch_res:.2f}"
     else:
         channel_info = f"- Market Structure: RANGING MARKET (No distinct structural channel detected)"
 
@@ -249,7 +247,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, ch_exists, 
     🎯 Target: [ATR Value]
     
     📊 **REASONING**
-    - [Explain your reasoning. Specifically analyze how the price is interacting with the structurally calculated support/resistance boundaries.]
+    - [Explain your reasoning. Specifically analyze how the price is interacting with the structurally calculated support/resistance boundaries that have mathematically ignored the rightmost breakout peak.]
     """
 
     try:
@@ -273,7 +271,7 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
 
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Bot Started in Quant Mode (Strict Structural Geometry)...")
+    print("🚀 Bot Started in Quant Mode (Percentile Outlier Filtering)...")
     
     last_full_report_time = 0 
     last_price = 0
