@@ -450,39 +450,10 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div class="glass-panel p-6 lg:col-span-2 h-[600px] flex flex-col">
-                <p class="text-slate-400 text-sm uppercase tracking-wider mb-4 border-b border-slate-700 pb-1">Live WTI Trajectory & Indicators (1H)</p>
-                
-                <div class="tradingview-widget-container flex-grow" style="height:100%; width:100%">
-                  <div id="tradingview_wti" style="height:100%; width:100%"></div>
-                  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-                  <script type="text/javascript">
-                  new TradingView.widget(
-                  {
-                  "autosize": true,
-                  "symbol": "NYMEX:CL1!", // WTI Crude Oil Futures
-                  "interval": "60", // 1-Hour Chart
-                  "timezone": "Etc/UTC",
-                  "theme": "dark",
-                  "style": "1",
-                  "locale": "en",
-                  "backgroundColor": "#0b0f19", // Matches your dashboard background exactly
-                  "gridColor": "#1e293b",
-                  "enable_publishing": false,
-                  "hide_top_toolbar": false,
-                  "hide_legend": false,
-                  "save_image": false,
-                  "container_id": "tradingview_wti",
-                  "studies": [
-                    "RSI@tv-basicstudies",
-                    "ATR@tv-basicstudies",
-                    "EMACross@tv-basicstudies"
-                  ]
-                }
-                  );
-                  </script>
-                </div>
-                </div>
+            <div class="glass-panel p-6 lg:col-span-2">
+                <p class="text-slate-400 text-sm uppercase tracking-wider mb-4 border-b border-slate-700 pb-1">Dual-Channel Trajectory (1H)</p>
+                <img src="/chart" alt="WTI Chart" class="w-full h-auto rounded border border-slate-700 shadow-2xl">
+            </div>
 
             <div class="glass-panel p-6 overflow-y-auto max-h-[500px]">
                 <p class="text-slate-400 text-sm uppercase tracking-wider mb-4 border-b border-slate-700 pb-1">48HR Macro Timeline</p>
