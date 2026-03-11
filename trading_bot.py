@@ -328,10 +328,11 @@ def run_bot():
                 action_match = re.search(r'Action:\s*(BUY|SELL|STRICT WAIT)', analysis, re.IGNORECASE)
                 DASHBOARD_DATA["trade_action"] = action_match.group(1).upper() if action_match else "STRICT WAIT"
                 
-                conv_match = re.search(r'CONVICTION SCORE:\s*\*?\*?(\d+%?)', analysis)
+                # UPDATED BULLETPROOF REGEX FOR CONVICTION & RISK
+                conv_match = re.search(r'CONVICTION SCORE[^\d]*(\d+%)', analysis, re.IGNORECASE)
                 DASHBOARD_DATA["conviction"] = conv_match.group(1) if conv_match else "0%"
                 
-                risk_match = re.search(r'RISK LEVEL:\s*\*?\*?(.*?)<br>', DASHBOARD_DATA["analysis"])
+                risk_match = re.search(r'RISK LEVEL[^\w]*(.*?)(?:<br>|\n)', DASHBOARD_DATA["analysis"])
                 DASHBOARD_DATA["risk"] = risk_match.group(1).replace('*', '').strip() if risk_match else "UNKNOWN"
                 
                 stop_match = re.search(r'Stop:\s*\$?([0-9.]+)', analysis)
