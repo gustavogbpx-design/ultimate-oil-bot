@@ -8,3 +8,4 @@ mplfinance
 matplotlib
 scipy
 numpy
+flask
