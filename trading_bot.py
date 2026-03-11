@@ -2,14 +2,15 @@ import os
 import time
 import calendar
 import base64 
-import threading # NEW: For running bot and web server at the same time
+import threading 
+import re # NEW: To extract data for the UI
 import yfinance as yf
 import requests
 import feedparser
 import pandas as pd
 import numpy as np
 import mplfinance as mpf
-from flask import Flask, render_template_string, send_file # NEW: Web Server
+from flask import Flask, render_template_string, send_file 
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
@@ -22,14 +23,22 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 MUTE_WAIT_SIGNALS = True 
 
 # --- GLOBAL STATE FOR THE DASHBOARD ---
-# The bot will update this dictionary, and the website will read from it.
 DASHBOARD_DATA = {
     "price": 0.00,
     "trend": "BOOTING...",
     "analysis": "Awaiting initial quant calculation...",
     "news": [],
     "last_update": "N/A",
-    "status": "Scanning..."
+    "status": "Scanning...",
+    "rsi": 0.00,
+    "atr": 0.00,
+    "ema_status": "WAITING",
+    "conviction": "0%",
+    "risk": "WAITING",
+    "trade_action": "STRICT WAIT",
+    "trade_entry": 0.00,
+    "trade_stop": 0.00,
+    "trade_target": 0.00
 }
 
 # --- WEB SERVER SETUP ---
@@ -106,7 +115,6 @@ def create_chart(plot_data):
     micro_exists, micro_sup, micro_res = calculate_universal_channel(plot_data.tail(70), cutoff_pct=0.80)
 
     mc = mpf.make_marketcolors(up='#00E676', down='#D500F9', edge='inherit', wick='inherit', volume='in')
-    # Changed chart background to deep dark blue to match your requested UI
     iq_style = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, facecolor='#0f172a', edgecolor='#1e293b', figcolor='#0f172a')
     
     kwargs = dict(type='candle', style=iq_style, volume=False, mav=(21, 50), 
@@ -129,22 +137,16 @@ def create_chart(plot_data):
     mpf.plot(plot_data, **kwargs)
     return fname
 
-# --- 4. GET NEWS ---
-# --- 4. GET NEWS (STRICTLY RECENT) ---
+# --- 4. GET NEWS (STRICT 48-HOUR FRESHNESS FILTER) ---
 def get_news():
     try:
-        # 1. Simplified query + forced Google to only look at recent history
         query = '("Crude Oil" OR "WTI" OR "OPEC" OR "Middle East") when:1d'
         base_url = "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en"
         final_url = base_url.format(requests.utils.quote(query))
-        
         feed = feedparser.parse(final_url)
         if not feed.entries: return [], []
         
-        headlines = []
-        raw_entries = []
-        
-        # 2. Get the exact current time to check article age
+        headlines, raw_entries = [], []
         current_time = calendar.timegm(time.gmtime())
         
         for entry in feed.entries:
@@ -152,22 +154,19 @@ def get_news():
                 entry_time = calendar.timegm(entry.published_parsed)
                 age_in_hours = (current_time - entry_time) / 3600
                 
-                # 3. THE FIREWALL: Only keep news less than 48 hours old!
                 if age_in_hours <= 48:
                     pub_time = entry.get('published', '')
                     title = entry.title.split(" - ")[0]
                     headlines.append({"title": title, "time": pub_time, "link": entry.link})
                     raw_entries.append(entry)
-            
-            # Stop once we have 7 fresh, highly-relevant headlines to save Gemini's context window
-            if len(headlines) >= 7:
-                break
+            if len(headlines) >= 7: break
                 
         return headlines, raw_entries
     except Exception as e:
         print(f"News fetch error: {e}")
         return [], []
 
+# --- 5. FIND MODEL ---
 def get_valid_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
     try:
@@ -181,6 +180,7 @@ def get_valid_model():
     except: pass
     return "models/gemini-1.5-flash"
 
+# --- 6. ANALYZE (SNIPER MODE) ---
 def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason, chart_file):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h['title']}" for h in headlines])
@@ -190,7 +190,7 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     take_profit_buy = price + (2.5 * atr)
     stop_loss_sell = price + (1.5 * atr) 
     take_profit_sell = price - (2.5 * atr)
-    ema_status = "BULLISH" if ema21 > ema50 else "BEARISH"
+    ema_status = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
 
     prompt = f"""
     Act as a Tactical Hedge Fund Algo (Day Trading Desk). 
@@ -278,9 +278,15 @@ def run_bot():
                 time.sleep(120)
                 continue
 
+            # Update Raw Technicals HUD
             DASHBOARD_DATA["price"] = price
             DASHBOARD_DATA["trend"] = trend
             DASHBOARD_DATA["news"] = headlines
+            DASHBOARD_DATA["rsi"] = rsi
+            DASHBOARD_DATA["atr"] = atr
+            DASHBOARD_DATA["ema_status"] = "BULLISH (21 > 50)" if ema21 > ema50 else "BEARISH (21 < 50)"
+            DASHBOARD_DATA["trade_entry"] = price
+            
             current_time = time.time()
             DASHBOARD_DATA["last_update"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
@@ -315,8 +321,26 @@ def run_bot():
                 chart = create_chart(plot_data)
                 analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason, chart)
                 
+                # Format text for web
                 DASHBOARD_DATA["analysis"] = analysis.replace('\n', '<br>')
                 
+                # --- DATA EXTRACTION MAGIC (Parsing Gemini's brain for the UI) ---
+                action_match = re.search(r'Action:\s*(BUY|SELL|STRICT WAIT)', analysis, re.IGNORECASE)
+                DASHBOARD_DATA["trade_action"] = action_match.group(1).upper() if action_match else "STRICT WAIT"
+                
+                conv_match = re.search(r'CONVICTION SCORE:\s*\*?\*?(\d+%?)', analysis)
+                DASHBOARD_DATA["conviction"] = conv_match.group(1) if conv_match else "0%"
+                
+                risk_match = re.search(r'RISK LEVEL:\s*\*?\*?(.*?)<br>', DASHBOARD_DATA["analysis"])
+                DASHBOARD_DATA["risk"] = risk_match.group(1).replace('*', '').strip() if risk_match else "UNKNOWN"
+                
+                stop_match = re.search(r'Stop:\s*\$?([0-9.]+)', analysis)
+                DASHBOARD_DATA["trade_stop"] = float(stop_match.group(1)) if stop_match else 0.00
+                
+                target_match = re.search(r'Target:\s*\$?([0-9.]+)', analysis)
+                DASHBOARD_DATA["trade_target"] = float(target_match.group(1)) if target_match else 0.00
+                # -----------------------------------------------------------------
+
                 if not (MUTE_WAIT_SIGNALS and "STRICT WAIT" in analysis.upper() and not is_emergency):
                     send_telegram(price, trend, analysis, chart, alert_reason)
                 
@@ -327,6 +351,7 @@ def run_bot():
                 
         except Exception as e:
             DASHBOARD_DATA["status"] = f"Error: {e}"
+            print(f"Error: {e}")
         
         time.sleep(120)
 
@@ -337,7 +362,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GLOBAL COMMODITIES • LIVE</title>
+    <title>WTI QUANT TERMINAL</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
@@ -345,6 +370,7 @@ HTML_TEMPLATE = """
         .glass-panel { background: rgba(15, 23, 42, 0.8); border: 1px solid #1e293b; border-radius: 8px; }
         .neon-red { color: #f87171; text-shadow: 0 0 10px rgba(248,113,113,0.5); }
         .neon-green { color: #4ade80; text-shadow: 0 0 10px rgba(74,222,128,0.5); }
+        .neon-blue { color: #60a5fa; text-shadow: 0 0 10px rgba(96,165,250,0.5); }
         .blink { animation: blinker 1.5s linear infinite; }
         @keyframes blinker { 50% { opacity: 0; } }
     </style>
@@ -357,17 +383,69 @@ HTML_TEMPLATE = """
             <div class="text-sm text-slate-400">Status: <span class="text-yellow-400">{{ data.status }}</span> | Last Update: {{ data.last_update }}</div>
         </header>
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+            
             <div class="glass-panel p-6 flex flex-col justify-center items-center">
-                <p class="text-slate-400 text-sm uppercase tracking-wider mb-2">Current Spot Price</p>
-                <h2 class="text-6xl font-bold {% if 'BULLISH' in data.trend %}neon-green{% else %}neon-red{% endif %}">${{ "%.2f"|format(data.price) }}</h2>
-                <p class="mt-2 text-sm text-slate-500">Trend: {{ data.trend }}</p>
+                <p class="text-slate-400 text-sm uppercase tracking-wider mb-2">Spot Price</p>
+                <h2 class="text-5xl font-bold {% if 'BULLISH' in data.trend %}neon-green{% else %}neon-red{% endif %}">${{ "%.2f"|format(data.price) }}</h2>
+                <p class="mt-2 text-xs text-slate-500">Trend: {{ data.trend }}</p>
             </div>
             
-            <div class="glass-panel p-6 md:col-span-2 overflow-y-auto max-h-48 text-sm">
-                <p class="text-slate-400 uppercase tracking-wider mb-2 border-b border-slate-700 pb-1">Gemini Quant Assessment</p>
-                <div class="text-slate-300 leading-relaxed">{{ data.analysis | safe }}</div>
+            <div class="glass-panel p-6 relative overflow-hidden md:col-span-2">
+                <div class="absolute top-0 left-0 w-full h-1 {% if 'BUY' in data.trade_action %}bg-green-500{% elif 'SELL' in data.trade_action %}bg-red-500{% else %}bg-slate-500{% endif %}"></div>
+                <p class="text-slate-400 text-sm uppercase tracking-wider mb-4 border-b border-slate-700 pb-1">Live Trade Setup</p>
+                
+                <div class="flex justify-between items-center mb-4">
+                    <div>
+                        <p class="text-xs text-slate-500">ACTION</p>
+                        <p class="text-3xl font-bold tracking-widest {% if 'BUY' in data.trade_action %}neon-green{% elif 'SELL' in data.trade_action %}neon-red{% else %}text-slate-300{% endif %}">{{ data.trade_action }}</p>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-xs text-slate-500">CONVICTION</p>
+                        <p class="text-2xl font-bold text-yellow-400">{{ data.conviction }}</p>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-3 gap-4 text-center border-t border-slate-700 pt-3">
+                    <div>
+                        <p class="text-xs text-slate-500">ENTRY</p>
+                        <p class="text-slate-200 font-mono text-lg">${{ "%.2f"|format(data.trade_entry) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-500">TARGET (TP)</p>
+                        <p class="text-green-400 font-mono text-lg">${{ "%.2f"|format(data.trade_target) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-slate-500">STOP LOSS (SL)</p>
+                        <p class="text-red-400 font-mono text-lg">${{ "%.2f"|format(data.trade_stop) }}</p>
+                    </div>
+                </div>
             </div>
+
+            <div class="glass-panel p-6 flex flex-col justify-between">
+                <p class="text-slate-400 text-sm uppercase tracking-wider mb-2 border-b border-slate-700 pb-1">Technicals HUD</p>
+                <div class="flex justify-between items-center mt-2">
+                    <span class="text-slate-400 text-sm">RSI (14)</span>
+                    <span class="font-mono font-bold {% if data.rsi > 70 %}text-red-400{% elif data.rsi < 30 %}text-green-400{% else %}text-slate-200{% endif %}">{{ "%.2f"|format(data.rsi) }}</span>
+                </div>
+                <div class="flex justify-between items-center mt-3">
+                    <span class="text-slate-400 text-sm">Vol (ATR)</span>
+                    <span class="font-mono text-indigo-400">${{ "%.2f"|format(data.atr) }}</span>
+                </div>
+                <div class="flex justify-between items-center mt-3">
+                    <span class="text-slate-400 text-sm">EMA Trend</span>
+                    <span class="font-mono text-xs {% if 'BULLISH' in data.ema_status %}text-green-400{% else %}text-red-400{% endif %}">{{ data.ema_status }}</span>
+                </div>
+                <div class="flex justify-between items-center mt-3 border-t border-slate-700 pt-2">
+                    <span class="text-slate-400 text-xs text-left">{{ data.risk }}</span>
+                </div>
+            </div>
+            
+        </div>
+
+        <div class="glass-panel p-4 text-sm">
+             <p class="text-slate-400 uppercase tracking-wider mb-2 border-b border-slate-700 pb-1">AI Reasoning Log</p>
+             <div class="text-slate-300 leading-relaxed font-sans">{{ data.analysis | safe }}</div>
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -376,8 +454,8 @@ HTML_TEMPLATE = """
                 <img src="/chart" alt="WTI Chart" class="w-full h-auto rounded border border-slate-700 shadow-2xl">
             </div>
 
-            <div class="glass-panel p-6 overflow-y-auto max-h-[600px]">
-                <p class="text-slate-400 text-sm uppercase tracking-wider mb-4 border-b border-slate-700 pb-1">Macro Event Timeline</p>
+            <div class="glass-panel p-6 overflow-y-auto max-h-[500px]">
+                <p class="text-slate-400 text-sm uppercase tracking-wider mb-4 border-b border-slate-700 pb-1">48HR Macro Timeline</p>
                 <div class="space-y-4">
                     {% for item in data.news %}
                     <div class="border-l-2 border-indigo-500 pl-3">
@@ -394,7 +472,7 @@ HTML_TEMPLATE = """
         
     </div>
     <script>
-        // Auto-refresh the page every 60 seconds to get new data
+        // Auto-refresh the page every 60 seconds
         setTimeout(function(){ location.reload(); }, 60000);
     </script>
 </body>
@@ -408,7 +486,6 @@ def dashboard():
 
 @app.route('/chart')
 def serve_chart():
-    # Serves the actual image generated by the bot
     if os.path.exists("oil_chart.png"):
         return send_file("oil_chart.png", mimetype='image/png')
     return "Chart generating, please refresh in a moment...", 404
@@ -416,12 +493,8 @@ def serve_chart():
 # --- RUN EVERYTHING ---
 if __name__ == "__main__":
     print("🚀 Firing up Parallel Engines: Bot + Dashboard Server...")
-    
-    # 1. Start the Telegram/Gemini Trading Bot in a separate background thread
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # 2. Start the Flask Web Server on the main thread
-    # Note: Railway requires host='0.0.0.0' and uses the PORT environment variable
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
