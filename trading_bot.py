@@ -176,27 +176,50 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
 
     prompt = f"""
     Act as a Tactical Hedge Fund Algo (Day Trading Desk). 
-    🚨 SYSTEM ALERT TRIGGER: {alert_reason} 🚨
-    ⏰ CURRENT SYSTEM TIME: {current_time_str}
     
-    GLOBAL NEWS FEED:
+    🚨 SYSTEM ALERT: {alert_reason}
+    ⏰ TIME: {current_time_str}
+    
+    NEWS FEED:
     {news_text}
     
-    TECHNICAL DATA (1-Hour Chart - WTI Crude Oil):
+    TECHNICALS:
     - Price: ${price:.2f}
-    - Absolute Hard Floor Support: ${recent_low:.2f}
+    - Floor Support: ${recent_low:.2f}
     - EMA Trend: {ema_status}
     - RSI: {rsi:.2f}
-    - Volatility (ATR): {atr:.2f}
+    - ATR: {atr:.2f}
     
-    IMAGE ANALYSIS DIRECTIVE: Look at the attached image. Where is the price touching the lines?
+    IMAGE DIRECTIVE: Look at the attached chart. White/Grey = Macro Channel. Blue Dashed = Micro Channel. 
     
-    TASK: Provide a highly concise quant summary.
-    OUTPUT FORMAT:
-    🎯 **CONVICTION SCORE: [0-100]%**
-    ⚠️ **RISK LEVEL: [🟢 LOW / 🟡 MEDIUM / 🔴 HIGH]**
-    💎 **TRADE DECISION**: [BUY / SELL / STRICT WAIT] at ${price:.2f}
-    📊 **REASONING**: [1-2 sentences max]
+    TASK: Give a highly concise, sniper-style quant report. NO fluff. NO long paragraphs. 
+    
+    CALCULATED LIMITS:
+    - BUY: Stop=${stop_loss_buy:.2f}, Target=${take_profit_buy:.2f}
+    - SELL: Stop=${stop_loss_sell:.2f}, Target=${take_profit_sell:.2f}
+    
+    OUTPUT FORMAT (STRICTLY FOLLOW THIS EXACT TEMPLATE):
+    
+    🎯 **CONVICTION SCORE:** [0-100]%
+    ⚠️ **RISK LEVEL:** [🟢 LOW / 🟡 MEDIUM / 🔴 HIGH]
+    
+    🌍 **MARKET DRIVER**
+    [Maximum 1 short sentence identifying the primary catalyst from the news.]
+    
+    👁️ **CHART VISION ANALYSIS**
+    [Maximum 2 short sentences describing exactly where the price is interacting with the White/Grey/Blue lines.]
+    
+    💎 **TRADE DECISION**
+    Action: [BUY / SELL / STRICT WAIT]
+    Entry: ${price:.2f}
+    🛡️ Stop: [Insert Calculated Limit]
+    🎯 Target: [Insert Calculated Limit]
+    
+    📊 **REASONING**
+    - *Fundamental:* [1 short sentence on the news impact.]
+    - *Structure:* [1 short sentence on channel support/resistance.]
+    - *Momentum:* [1 short sentence on RSI/EMA.]
+    - *Risk:* [1 short sentence on why the stop loss is placed there.]
     """
 
     parts = [{"text": prompt}]
