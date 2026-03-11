@@ -1,7 +1,7 @@
 import os
 import time
 import calendar
-import base64 # NEW: Required for Gemini Vision
+import base64
 import yfinance as yf
 import requests
 import feedparser
@@ -179,7 +179,6 @@ def get_valid_model():
     return "models/gemini-1.5-flash"
 
 # --- 6. ANALYZE (VISION ENABLED FOR OIL) ---
-# ADDED chart_file parameter here!
 def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason, chart_file):
     model_name = get_valid_model()
     news_text = "\n".join([f"- {h}" for h in headlines])
@@ -247,7 +246,6 @@ def analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, 
     - [Explain your reasoning based on the visual data, technical numbers, and recent news.]
     """
 
-    # --- IMAGE ENCODING FOR GEMINI ---
     parts = [{"text": prompt}]
     
     if chart_file and os.path.exists(chart_file):
@@ -283,9 +281,10 @@ def send_telegram(price, trend, analysis, chart_file, alert_reason):
     text = f"{header}\nTrigger: {alert_reason}\nPrice: ${price:.2f}\nTrend: {trend}\n\n{analysis}"
     requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': text})
 
+
 # --- MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Oil Bot Started in Quant Mode (Vision-Enabled Multimodal Engine)...")
+    print("🚀 Oil Bot Started in Quant Mode (API Limit Protector Active)...")
     
     last_full_report_time = 0 
     last_price = 0
@@ -302,26 +301,43 @@ if __name__ == "__main__":
                 continue
 
             current_time = time.time()
+            
+            # -----------------------------------------------------------------
+            # ⚡ FAST-TRACK PRICE SPIKE FILTER (BYPASSES GEMINI AI ENTIRELY) ⚡
+            # -----------------------------------------------------------------
+            if last_price > 0 and abs(price - last_price) >= 0.50:
+                diff = price - last_price
+                direction = "UPWARDS 🟢" if diff > 0 else "DOWNWARDS 🔴"
+                
+                spike_msg = f"⚡ **FAST SPIKE ALERT (WTI)** ⚡\n\nPrice moved **${abs(diff):.2f} {direction}** suddenly!\nCurrent Price: ${price:.2f}\n\n*(Bypassing AI to save API limits)*"
+                
+                print(f"⚠️ Price Spike! {direction} ${abs(diff):.2f}. Sending fast Telegram alert.")
+                
+                # Send lightweight text-only message straight to Telegram
+                base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+                requests.post(f"{base_url}/sendMessage", data={'chat_id': TELEGRAM_CHAT_ID, 'text': spike_msg})
+                
+                last_price = price # Update price so it doesn't alert again unless it moves ANOTHER $0.50
+                time.sleep(120)
+                continue # Skip the rest of the loop and start fresh!
+
+            # -----------------------------------------------------------------
+            # 🧠 REGULAR AI CHECKS (BREAKING NEWS OR 30-MIN TIMER) 🧠
+            # -----------------------------------------------------------------
             is_emergency = False
             alert_reason = "Regular 30-min Check"
 
-            # Kept the 0.50 threshold for Oil
-            if last_price > 0 and abs(price - last_price) >= 0.50:
-                is_emergency = True
-                alert_reason = f"PRICE SPIKE! Moved ${abs(price - last_price):.2f} suddenly!"
-
-            if not is_emergency: 
-                current_utc = calendar.timegm(time.gmtime())
-                for entry in raw_entries:
-                    if 'published_parsed' in entry:
-                        entry_time = calendar.timegm(entry.published_parsed)
-                        age_in_seconds = current_utc - entry_time
-                        
-                        if age_in_seconds < 900 and entry.link not in seen_news_links:
-                            is_emergency = True
-                            alert_reason = f"BREAKING OIL NEWS: {entry.title.split(' - ')[0]}"
-                            seen_news_links.add(entry.link)
-                            break 
+            current_utc = calendar.timegm(time.gmtime())
+            for entry in raw_entries:
+                if 'published_parsed' in entry:
+                    entry_time = calendar.timegm(entry.published_parsed)
+                    age_in_seconds = current_utc - entry_time
+                    
+                    if age_in_seconds < 900 and entry.link not in seen_news_links:
+                        is_emergency = True
+                        alert_reason = f"BREAKING OIL NEWS: {entry.title.split(' - ')[0]}"
+                        seen_news_links.add(entry.link)
+                        break 
 
             time_since_last_report = current_time - last_full_report_time
             is_time_up = time_since_last_report >= 1800 
@@ -329,10 +345,7 @@ if __name__ == "__main__":
             if is_emergency or is_time_up:
                 print(f"⚠️ Waking up Gemini! Reason: {alert_reason}")
                 
-                # 1. CREATE THE CHART FIRST
                 chart = create_chart(plot_data)
-                
-                # 2. PASS THE CHART TO GEMINI FOR VISUAL ANALYSIS
                 analysis = analyze_market(price, rsi, trend, atr, ema50, ema21, recent_low, headlines, alert_reason, chart)
                 
                 is_wait_signal = "STRICT WAIT" in analysis.upper()
