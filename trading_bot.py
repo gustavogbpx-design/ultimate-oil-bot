@@ -130,24 +130,42 @@ def create_chart(plot_data):
     return fname
 
 # --- 4. GET NEWS ---
+# --- 4. GET NEWS (STRICTLY RECENT) ---
 def get_news():
     try:
-        query = "(\"Crude Oil\" OR \"WTI\" OR OPEC) OR ((\"War\" OR \"Attack\" OR \"Iran\" OR \"Russia\" OR \"Ukraine\" OR \"Explosion\" OR \"Refinery\" OR \"Sanctions\" OR \"Hurricane\") AND (\"Oil\" OR \"Energy\"))"
+        # 1. Simplified query + forced Google to only look at recent history
+        query = '("Crude Oil" OR "WTI" OR "OPEC" OR "Middle East") when:1d'
         base_url = "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en"
         final_url = base_url.format(requests.utils.quote(query))
+        
         feed = feedparser.parse(final_url)
         if not feed.entries: return [], []
         
         headlines = []
         raw_entries = []
-        for entry in feed.entries[:10]:
-            pub_time = entry.get('published', '')
-            title = entry.title.split(" - ")[0]
-            headlines.append({"title": title, "time": pub_time, "link": entry.link})
-            raw_entries.append(entry)
+        
+        # 2. Get the exact current time to check article age
+        current_time = calendar.timegm(time.gmtime())
+        
+        for entry in feed.entries:
+            if 'published_parsed' in entry:
+                entry_time = calendar.timegm(entry.published_parsed)
+                age_in_hours = (current_time - entry_time) / 3600
+                
+                # 3. THE FIREWALL: Only keep news less than 48 hours old!
+                if age_in_hours <= 48:
+                    pub_time = entry.get('published', '')
+                    title = entry.title.split(" - ")[0]
+                    headlines.append({"title": title, "time": pub_time, "link": entry.link})
+                    raw_entries.append(entry)
             
+            # Stop once we have 7 fresh, highly-relevant headlines to save Gemini's context window
+            if len(headlines) >= 7:
+                break
+                
         return headlines, raw_entries
-    except:
+    except Exception as e:
+        print(f"News fetch error: {e}")
         return [], []
 
 def get_valid_model():
