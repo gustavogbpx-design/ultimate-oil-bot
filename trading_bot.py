@@ -1,11 +1,11 @@
 """
-WTI / USOIL Combined Bot v3
+WTI / USOIL Combined Bot v5
 ==========================
 
 Purpose
 -------
 This is a combined version of your original 30-minute alert system plus a
-separate weekend opening-spike probability module.
+separate opening-spike probability module that starts sending preview messages from Friday 6:00 PM Sri Lanka time.
 
 Important design change
 -----------------------
@@ -22,6 +22,7 @@ Core outputs
 - Chart image: /chart
 - 30-minute alert log: intraday_alert_log.csv
 - Opening spike log: opening_spike_audit_log.csv
+- Session gate: weekday intraday alerts, Friday 6 PM Sri Lanka opening-spike preview, reopen active alerts
 - Historical weekend cases: weekend_opening_history.csv
 
 Environment variables
@@ -33,10 +34,10 @@ Optional:
     PORT
 
 Install:
-    pip install -r requirements_wti_combined_bot_v3.txt
+    pip install -r requirements_wti_combined_bot_v5.txt
 
 Run:
-    python wti_combined_30min_opening_spike_bot_v3.py
+    python wti_combined_30min_opening_spike_bot_v5.py
 """
 
 import os
@@ -48,6 +49,7 @@ import calendar
 import threading
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -100,12 +102,36 @@ MANUAL_LEVELS = {
     "lower_support_2": 86.71,
 }
 
-# Opening-spike watch window.
-# Many brokers reopen around Sunday evening US time, which can be Monday morning
-# in Sri Lanka. This window is deliberately broad.
-OPENING_SPIKE_ACTIVE_WEEKDAYS_UTC = {6, 0}  # Sunday=6, Monday=0
-OPENING_SPIKE_START_HOUR_UTC = 20           # Sunday from 20:00 UTC
-OPENING_SPIKE_END_HOUR_UTC = 3              # Monday until 03:59 UTC
+# Session gate and opening-spike watch window.
+# -----------------------------------------------------------------------------
+# v5 behavior requested:
+# - Normal 30-minute intraday alerts run only before the Friday 6 PM local cutoff
+#   and during regular weekday monitoring windows.
+# - From FRIDAY 6:00 PM Sri Lanka time, the bot starts sending opening-spike
+#   preview messages instead of normal 30-minute BUY/SELL alerts.
+# - During the actual Sunday/Monday reopen window, opening-spike alerts become
+#   high-priority and can be sent more frequently.
+#
+# All local cutoff settings below use Asia/Colombo by default. You can change
+# the timezone through BOT_LOCAL_TIMEZONE if your broker/session is different.
+LOCAL_TIMEZONE_NAME = os.environ.get("BOT_LOCAL_TIMEZONE", "Asia/Colombo")
+LOCAL_TZ = ZoneInfo(LOCAL_TIMEZONE_NAME)
+
+# Friday 6 PM local = start opening-spike preview messages.
+OPENING_PREVIEW_START_WEEKDAY = int(os.environ.get("OPENING_PREVIEW_START_WEEKDAY", 4))  # Monday=0 ... Friday=4
+OPENING_PREVIEW_START_HOUR_LOCAL = int(os.environ.get("OPENING_PREVIEW_START_HOUR_LOCAL", 18))
+OPENING_PREVIEW_START_MINUTE_LOCAL = int(os.environ.get("OPENING_PREVIEW_START_MINUTE_LOCAL", 0))
+
+# Actual reopen/high-priority window. Default is Sunday 20:00 UTC to Monday 03:59 UTC.
+# For Sri Lanka this is approximately Monday 01:30 AM to Monday 09:29 AM.
+OPENING_SPIKE_START_HOUR_UTC = int(os.environ.get("OPENING_SPIKE_START_HOUR_UTC", 20))
+OPENING_SPIKE_END_HOUR_UTC = int(os.environ.get("OPENING_SPIKE_END_HOUR_UTC", 3))
+
+# Message cadence.
+# From Friday 6 PM local: default sends opening-spike preview every 30 minutes.
+# Active reopen window: default sends every 15 minutes, or immediately if bias changes.
+PRE_OPEN_PREVIEW_INTERVAL_SECONDS = int(os.environ.get("PRE_OPEN_PREVIEW_INTERVAL_SECONDS", 1800))
+OPENING_ACTIVE_ALERT_INTERVAL_SECONDS = int(os.environ.get("OPENING_ACTIVE_ALERT_INTERVAL_SECONDS", 900))
 
 # Files
 CHART_FILE = "oil_chart.png"
@@ -123,6 +149,7 @@ app = Flask(__name__)
 DASHBOARD_DATA: Dict[str, Any] = {
     "status": "Booting...",
     "last_update": "N/A",
+    "local_update": "N/A",
     "price": 0.0,
     "trend": "WAITING",
     "rsi15": 0.0,
@@ -140,6 +167,14 @@ DASHBOARD_DATA: Dict[str, Any] = {
     "factor_table": [],
     "opening_factor_table": [],
     "calibration": {},
+    "session": {
+        "mode": "BOOTING",
+        "description": "Starting session gate...",
+        "allow_intraday_alerts": False,
+        "allow_opening_preview": False,
+        "allow_opening_active_alerts": False,
+        "telegram_policy": "WAITING",
+    },
 }
 
 
@@ -182,6 +217,18 @@ class OpeningSpikeResult:
     historical_summary: str
 
 
+@dataclass
+class SessionState:
+    mode: str
+    description: str
+    allow_intraday_alerts: bool
+    allow_fast_spike_alerts: bool
+    allow_breaking_news_alerts: bool
+    allow_opening_preview: bool
+    allow_opening_active_alerts: bool
+    telegram_policy: str
+
+
 # =============================================================================
 # 4. UTILITY FUNCTIONS
 # =============================================================================
@@ -190,9 +237,182 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def local_now(now: Optional[datetime] = None) -> datetime:
+    """Return current time in the configured local timezone, default Asia/Colombo."""
+    base = now or utc_now()
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return base.astimezone(LOCAL_TZ)
+
+
 def utc_now_str() -> str:
     return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
+
+def local_now_str(now: Optional[datetime] = None) -> str:
+    return local_now(now).strftime(f"%Y-%m-%d %H:%M:%S {LOCAL_TIMEZONE_NAME}")
+
+
+def after_friday_6pm_local(now: Optional[datetime] = None) -> bool:
+    """
+    True from Friday 6:00 PM local time until the Monday post-open active window ends.
+    This is the requested start point for opening-spike preview messages.
+    """
+    local = local_now(now)
+    wd = local.weekday()  # Monday=0 ... Sunday=6
+    minutes_now = local.hour * 60 + local.minute
+    cutoff_minutes = OPENING_PREVIEW_START_HOUR_LOCAL * 60 + OPENING_PREVIEW_START_MINUTE_LOCAL
+
+    # Friday at/after 18:00 local.
+    if wd == OPENING_PREVIEW_START_WEEKDAY and minutes_now >= cutoff_minutes:
+        return True
+
+    # Saturday and Sunday are always preview period.
+    if wd in {5, 6}:
+        return True
+
+    # Early Monday is still part of opening/reopen monitoring until UTC end hour.
+    utc = (now or utc_now()).astimezone(timezone.utc)
+    if wd == 0 and utc.hour <= OPENING_SPIKE_END_HOUR_UTC:
+        return True
+
+    return False
+
+
+def get_session_state(now: Optional[datetime] = None) -> SessionState:
+    """
+    v5 hard session gate for Telegram alerts.
+
+    User-requested behavior:
+    - Before Friday 6 PM Sri Lanka time: normal weekday 30-minute alerts.
+    - From Friday 6 PM Sri Lanka time: send opening-spike preview messages.
+    - Saturday/Sunday: no normal intraday BUY/SELL alerts; opening-spike preview only.
+    - Sunday 20:00 UTC to Monday 03:59 UTC: high-priority opening-spike active alerts.
+    - After active window Monday: resume normal 30-minute alert system.
+
+    This is a behavior gate for the bot, not a guarantee of exact broker liquidity.
+    """
+    now = now or utc_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    utc = now.astimezone(timezone.utc)
+    local = now.astimezone(LOCAL_TZ)
+    wd_utc = utc.weekday()
+    hr_utc = utc.hour
+    wd_local = local.weekday()
+    local_minutes = local.hour * 60 + local.minute
+    preview_cutoff_minutes = OPENING_PREVIEW_START_HOUR_LOCAL * 60 + OPENING_PREVIEW_START_MINUTE_LOCAL
+
+    # Actual active reopen watch window: Sunday 20:00 UTC onward.
+    if wd_utc == 6 and hr_utc >= OPENING_SPIKE_START_HOUR_UTC:
+        return SessionState(
+            mode="OPENING_SPIKE_ACTIVE",
+            description=(
+                f"Reopen active window. Opening-spike alerts are active. Local time: {local_now_str(now)}."
+            ),
+            allow_intraday_alerts=False,
+            allow_fast_spike_alerts=False,
+            allow_breaking_news_alerts=True,
+            allow_opening_preview=True,
+            allow_opening_active_alerts=True,
+            telegram_policy="Send opening-spike probability alerts; block normal 30-minute intraday alerts.",
+        )
+
+    # Early Monday UTC still belongs to reopen watch window.
+    if wd_utc == 0 and hr_utc <= OPENING_SPIKE_END_HOUR_UTC:
+        return SessionState(
+            mode="OPENING_SPIKE_ACTIVE",
+            description=(
+                f"Early Monday reopen watch. Opening-spike alerts remain active. Local time: {local_now_str(now)}."
+            ),
+            allow_intraday_alerts=False,
+            allow_fast_spike_alerts=False,
+            allow_breaking_news_alerts=True,
+            allow_opening_preview=True,
+            allow_opening_active_alerts=True,
+            telegram_policy="Send opening-spike probability alerts. Resume normal 30-minute alerts after this window.",
+        )
+
+    # Requested Friday 6 PM local preview start.
+    if wd_local == OPENING_PREVIEW_START_WEEKDAY and local_minutes >= preview_cutoff_minutes:
+        return SessionState(
+            mode="FRIDAY_6PM_OPENING_PREVIEW",
+            description=(
+                f"Friday 6 PM local opening-spike preview started. Local time: {local_now_str(now)}. "
+                "Normal 30-minute intraday alerts are blocked; spike-probability messages are allowed."
+            ),
+            allow_intraday_alerts=False,
+            allow_fast_spike_alerts=False,
+            allow_breaking_news_alerts=True,
+            allow_opening_preview=True,
+            allow_opening_active_alerts=False,
+            telegram_policy="From Friday 6 PM local, send opening-spike preview messages every configured preview interval.",
+        )
+
+    # Saturday: preview only.
+    if wd_local == 5:
+        return SessionState(
+            mode="SATURDAY_OPENING_PREVIEW",
+            description=(
+                f"Saturday closed/pre-open mode. Local time: {local_now_str(now)}. "
+                "Normal 30-minute intraday alerts are blocked; opening-spike preview messages continue."
+            ),
+            allow_intraday_alerts=False,
+            allow_fast_spike_alerts=False,
+            allow_breaking_news_alerts=True,
+            allow_opening_preview=True,
+            allow_opening_active_alerts=False,
+            telegram_policy="Opening-spike preview alerts only; no normal intraday BUY/SELL alerts.",
+        )
+
+    # Sunday before active reopen window: preview only.
+    if wd_local == 6:
+        return SessionState(
+            mode="SUNDAY_PRE_OPEN_PREVIEW",
+            description=(
+                f"Sunday pre-open preview. Local time: {local_now_str(now)}. "
+                "Normal 30-minute intraday alerts are blocked; opening-spike preview messages continue."
+            ),
+            allow_intraday_alerts=False,
+            allow_fast_spike_alerts=False,
+            allow_breaking_news_alerts=True,
+            allow_opening_preview=True,
+            allow_opening_active_alerts=False,
+            telegram_policy="Opening-spike preview alerts only until the active reopen window begins.",
+        )
+
+    # Monday after active window through Friday before 6 PM local: normal intraday mode.
+    if wd_local in {0, 1, 2, 3, 4}:
+        return SessionState(
+            mode="WEEKDAY_30MIN_ACTIVE",
+            description=(
+                f"Weekday 30-minute monitoring mode. Local time: {local_now_str(now)}. "
+                "Normal intraday alerts and emergency alerts are allowed."
+            ),
+            allow_intraday_alerts=True,
+            allow_fast_spike_alerts=True,
+            allow_breaking_news_alerts=True,
+            allow_opening_preview=False,
+            allow_opening_active_alerts=False,
+            telegram_policy="Send normal 30-minute alert-system Telegram messages when due.",
+        )
+
+    # Defensive fallback.
+    return SessionState(
+        mode="UNKNOWN_BLOCKED",
+        description=f"Unknown session. Local time: {local_now_str(now)}. Telegram trade alerts are blocked.",
+        allow_intraday_alerts=False,
+        allow_fast_spike_alerts=False,
+        allow_breaking_news_alerts=False,
+        allow_opening_preview=False,
+        allow_opening_active_alerts=False,
+        telegram_policy="Blocked by safety fallback.",
+    )
+
+
+def is_opening_spike_active_now(now: Optional[datetime] = None) -> bool:
+    return get_session_state(now).mode == "OPENING_SPIKE_ACTIVE"
 
 def safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -949,17 +1169,8 @@ def calculate_intraday_alert(
 # =============================================================================
 
 def is_opening_spike_watch_window() -> bool:
-    now = utc_now()
-    wd = now.weekday()
-    hr = now.hour
-
-    # Sunday after configured hour
-    if wd == 6 and hr >= OPENING_SPIKE_START_HOUR_UTC:
-        return True
-    # Monday before configured end hour
-    if wd == 0 and hr <= OPENING_SPIKE_END_HOUR_UTC:
-        return True
-    return False
+    # In v4 this is controlled by the central session gate.
+    return is_opening_spike_active_now()
 
 
 def build_weekend_history_from_15m(df15: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -1413,7 +1624,8 @@ def build_telegram_text(
 ) -> str:
     return (
         f"WTI / USOIL ALERT: {alert_reason}\n"
-        f"Time: {utc_now_str()}\n\n"
+        f"UTC Time: {utc_now_str()}\n"
+        f"Local Time: {local_now_str()}\n\n"
         f"30-MIN SYSTEM\n"
         f"Action: {intraday.action}\n"
         f"Bias: {intraday.direction_bias}\n"
@@ -1535,6 +1747,7 @@ def update_dashboard_raw(bundle: Dict[str, Any], headlines: List[Dict[str, Any]]
     DASHBOARD_DATA["news"] = headlines
     DASHBOARD_DATA["news_score"] = news_score
     DASHBOARD_DATA["last_update"] = utc_now_str()
+    DASHBOARD_DATA["local_update"] = local_now_str()
     DASHBOARD_DATA["data_quality"] = data_quality
 
     if latest15 is not None:
@@ -1554,13 +1767,19 @@ def update_dashboard_raw(bundle: Dict[str, Any], headlines: List[Dict[str, Any]]
 def run_bot() -> None:
     global DASHBOARD_DATA
 
-    last_full_report_time = 0.0
+    last_intraday_report_time = 0.0
+    last_opening_preview_time = 0.0
+    last_opening_active_time = 0.0
     last_price = 0.0
+    last_opening_bias_sent = ""
     seen_news_links: set = set()
 
     while True:
         try:
-            DASHBOARD_DATA["status"] = "Fetching market data..."
+            session = get_session_state()
+            DASHBOARD_DATA["session"] = asdict(session)
+            DASHBOARD_DATA["status"] = f"Fetching market data... [{session.mode}]"
+
             bundle = get_market_bundle()
             df15 = bundle.get("df15")
             df1h = bundle.get("df1h")
@@ -1570,13 +1789,14 @@ def run_bot() -> None:
             data_quality = check_data_quality(df15, df1h)
 
             update_dashboard_raw(bundle, headlines, news_score, data_quality)
+            DASHBOARD_DATA["session"] = asdict(session)
 
             if df15 is None or df15.empty or df1h is None or df1h.empty:
-                DASHBOARD_DATA["status"] = "Waiting for enough market data..."
+                DASHBOARD_DATA["status"] = f"Waiting for enough market data... [{session.mode}]"
                 time.sleep(LOOP_SLEEP_SECONDS)
                 continue
 
-            DASHBOARD_DATA["status"] = "Calculating 30-min and opening-spike engines..."
+            DASHBOARD_DATA["status"] = f"Calculating engines... [{session.mode}]"
 
             intraday = calculate_intraday_alert(df15, df1h, news_score, data_quality, last_price)
             opening = calculate_opening_spike_probability(df15, df1h, news_score, data_quality)
@@ -1587,57 +1807,138 @@ def run_bot() -> None:
             DASHBOARD_DATA["opening_factor_table"] = [asdict(f) for f in opening.factors]
             DASHBOARD_DATA["calibration"] = get_calibration_summary()
 
-            # Emergency triggers
             current_time = time.time()
-            is_time_up = (current_time - last_full_report_time) >= MAIN_REPORT_INTERVAL_SECONDS
-            alert_reason = "30-minute scheduled report"
-            is_emergency = False
 
-            # Fast spike checker
-            if last_price > 0 and abs(price - last_price) >= FAST_SPIKE_THRESHOLD:
+            # -----------------------------------------------------------------
+            # v4 HARD SESSION GATE
+            # -----------------------------------------------------------------
+            # Normal 30-minute reports are allowed only in WEEKDAY_30MIN_ACTIVE.
+            intraday_due = (
+                session.allow_intraday_alerts
+                and (current_time - last_intraday_report_time) >= MAIN_REPORT_INTERVAL_SECONDS
+            )
+
+            # Fast price-spike alerts are allowed only in weekday intraday mode.
+            fast_spike_event = False
+            if session.allow_fast_spike_alerts and last_price > 0 and abs(price - last_price) >= FAST_SPIKE_THRESHOLD:
+                fast_spike_event = True
+
+            # Breaking news can trigger a report only in session modes that allow it.
+            breaking_news_event = False
+            breaking_news_title = ""
+            if session.allow_breaking_news_alerts:
+                current_utc = calendar.timegm(time.gmtime())
+                for entry in raw_entries:
+                    if "published_parsed" in entry:
+                        age_seconds = current_utc - calendar.timegm(entry.published_parsed)
+                        link = entry.get("link", "")
+                        if age_seconds < FRESH_NEWS_SECONDS and link not in seen_news_links:
+                            breaking_news_event = True
+                            breaking_news_title = clean_title(entry.get("title", ""))
+                            seen_news_links.add(link)
+                            break
+
+            # Friday 6 PM local / weekend preview: send opening-spike probability
+            # messages on the preview cadence. Do not require a strong edge; the
+            # message itself can say SPIKE UP, SPIKE DOWN, or NO CLEAN EDGE.
+            opening_preview_due = (
+                session.allow_opening_preview
+                and not session.allow_opening_active_alerts
+                and price > 0
+                and (current_time - last_opening_preview_time) >= PRE_OPEN_PREVIEW_INTERVAL_SECONDS
+            )
+
+            # Reopen window: opening-spike active alerts.
+            opening_active_due = (
+                session.allow_opening_active_alerts
+                and opening.active
+                and opening.confidence >= 55
+                and (
+                    (current_time - last_opening_active_time) >= OPENING_ACTIVE_ALERT_INTERVAL_SECONDS
+                    or opening.bias != last_opening_bias_sent
+                )
+            )
+
+            alert_reason = ""
+            report_type = "NONE"
+
+            if fast_spike_event:
                 diff = price - last_price
-                is_emergency = True
                 alert_reason = f"FAST PRICE SPIKE {diff:+.2f}"
+                report_type = "INTRADAY"
+            elif breaking_news_event:
+                alert_reason = f"BREAKING NEWS: {breaking_news_title}"
+                if session.allow_intraday_alerts:
+                    report_type = "INTRADAY"
+                elif session.allow_opening_active_alerts:
+                    report_type = "OPENING"
+                elif session.allow_opening_preview:
+                    report_type = "OPENING_PREVIEW"
+                else:
+                    report_type = "NONE"
+            elif opening_active_due:
+                alert_reason = "OPENING SPIKE ACTIVE WINDOW"
+                report_type = "OPENING"
+            elif opening_preview_due:
+                alert_reason = "FRIDAY 6PM / WEEKEND OPENING-SPIKE PREVIEW"
+                report_type = "OPENING_PREVIEW"
+            elif intraday_due:
+                alert_reason = "30-minute scheduled report"
+                report_type = "INTRADAY"
 
-            # Breaking news checker
-            current_utc = calendar.timegm(time.gmtime())
-            for entry in raw_entries:
-                if "published_parsed" in entry:
-                    age_seconds = current_utc - calendar.timegm(entry.published_parsed)
-                    link = entry.get("link", "")
-                    if age_seconds < FRESH_NEWS_SECONDS and link not in seen_news_links:
-                        is_emergency = True
-                        alert_reason = f"BREAKING NEWS: {clean_title(entry.get('title', ''))}"
-                        seen_news_links.add(link)
-                        break
+            should_generate_report = report_type != "NONE"
 
-            # Opening spike watch can trigger a report even if not 30 min yet.
-            if opening.active and opening.confidence >= 55:
-                if (current_time - last_full_report_time) >= 900:
-                    is_emergency = True
-                    alert_reason = "OPENING SPIKE WATCH ACTIVE"
-
-            if is_time_up or is_emergency:
+            if should_generate_report:
                 chart = create_chart(df1h, df15)
-                DASHBOARD_DATA["status"] = "Generating explanation..."
+                DASHBOARD_DATA["status"] = f"Generating explanation... [{session.mode}]"
                 explanation = ai_explain_result(intraday, opening, headlines, data_quality, chart)
                 DASHBOARD_DATA["analysis"] = explanation
 
-                log_intraday_result(intraday, news_score, data_quality)
-                log_opening_spike_result(opening, price, news_score)
+                # Log only the relevant model.
+                if report_type == "INTRADAY":
+                    log_intraday_result(intraday, news_score, data_quality)
+                    last_intraday_report_time = current_time
+                else:
+                    log_opening_spike_result(opening, price, news_score)
+                    if report_type == "OPENING_PREVIEW":
+                        last_opening_preview_time = current_time
+                    if report_type == "OPENING":
+                        last_opening_active_time = current_time
+                        last_opening_bias_sent = opening.bias
 
+                # Final Telegram permission gate.
                 should_send = True
-                if MUTE_WAIT_SIGNALS and intraday.action == "STRICT WAIT" and not is_emergency and not opening.active:
+
+                # Never send intraday BUY/SELL/WAIT alerts outside weekday active mode.
+                if report_type == "INTRADAY" and not session.allow_intraday_alerts:
                     should_send = False
 
+                # Do not spam strict waits in normal weekday mode.
+                if (
+                    report_type == "INTRADAY"
+                    and MUTE_WAIT_SIGNALS
+                    and intraday.action == "STRICT WAIT"
+                    and not fast_spike_event
+                    and not breaking_news_event
+                ):
+                    should_send = False
+
+                # v5: From Friday 6 PM local, send the opening-spike preview message
+                # even when the result is NO CLEAN EDGE, because the user wants the
+                # probability feed before the market opens.
+
                 if should_send:
-                    telegram_text = build_telegram_text(alert_reason, intraday, opening, data_quality, news_score)
+                    telegram_text = build_telegram_text(
+                        f"{alert_reason} | SESSION: {session.mode}",
+                        intraday,
+                        opening,
+                        data_quality,
+                        news_score,
+                    )
                     send_telegram_message(telegram_text, chart)
 
-                last_full_report_time = time.time()
-
             last_price = price
-            DASHBOARD_DATA["status"] = "Monitoring active"
+            DASHBOARD_DATA["status"] = f"Monitoring active [{session.mode}]"
 
         except Exception as e:
             DASHBOARD_DATA["status"] = f"Error: {e}"
@@ -1684,13 +1985,30 @@ HTML_TEMPLATE = """
                 WTI / USOIL COMBINED TERMINAL
                 <span class="text-xs green align-top blink">● LIVE</span>
             </h1>
-            <p class="muted text-sm mt-1">30-minute alert system + weekend opening-spike probability module</p>
+            <p class="muted text-sm mt-1">30-minute alert system + Friday 6 PM opening-spike preview + reopen active alerts</p>
         </div>
         <div class="text-sm muted">
             Status: <span class="yellow">{{ data.status }}</span><br>
-            Last update: {{ data.last_update }}
+            Last update: {{ data.last_update }}<br>Local: {{ data.local_update }}
         </div>
     </header>
+
+    <section class="panel p-4">
+        {% set session = data.session %}
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-2">
+            <div>
+                <p class="muted text-xs uppercase">Session Gate</p>
+                <p class="text-xl font-extrabold blue">{{ session.mode }}</p>
+                <p class="text-xs muted mt-1">{{ session.description }}</p>
+            </div>
+            <div class="text-xs md:text-right muted">
+                Intraday alerts: <span class="{{ 'green' if session.allow_intraday_alerts else 'red' }}">{{ session.allow_intraday_alerts }}</span><br>
+                Opening preview: <span class="{{ 'green' if session.allow_opening_preview else 'red' }}">{{ session.allow_opening_preview }}</span><br>
+                Opening active alerts: <span class="{{ 'green' if session.allow_opening_active_alerts else 'red' }}">{{ session.allow_opening_active_alerts }}</span><br>
+                Policy: {{ session.telegram_policy }}
+            </div>
+        </div>
+    </section>
 
     <section class="grid grid-cols-1 md:grid-cols-4 gap-5">
         <div class="panel p-5">
